@@ -5320,6 +5320,12 @@ static CLG_LogRef LOG_WL_TOUCH = {"ghost.wl.handle.touch"};
 #define LOG (&LOG_WL_TOUCH)
 
 static constexpr float touch_context_tap_move_threshold = 12.0f;
+static constexpr float touch_gesture_max_distance_window_factor = 1.5f;
+static constexpr float touch_gesture_max_pan_window_factor = 0.15f;
+static constexpr float touch_gesture_max_scale_per_frame = 1.25f;
+static constexpr float touch_gesture_max_window_margin_factor = 0.25f;
+static constexpr float touch_pinch_min_distance = 5.0f;
+static constexpr float touch_pinch_scale_factor = 300.0f;
 static constexpr uint64_t touch_two_finger_tap_max_ms = 350;
 
 static int touch_seat_state_active_count(const GWL_Seat *seat)
@@ -5393,6 +5399,75 @@ static bool touch_seat_state_midpoint_and_distance_get(const GWL_Seat *seat,
   r_midpoint[1] = (xy_a[1] + xy_b[1]) * 0.5f;
   *r_distance = float(std::hypot(xy_a[0] - xy_b[0], xy_a[1] - xy_b[1]));
   return true;
+}
+
+static float touch_window_diagonal_get(const GHOST_WindowWayland *win)
+{
+  GHOST_Rect bounds;
+  win->getClientBounds(bounds);
+  return float(std::hypot(std::max(bounds.getWidth(), 1), std::max(bounds.getHeight(), 1)));
+}
+
+static bool touch_gesture_sample_is_valid(const GHOST_WindowWayland *win,
+                                          const float midpoint[2],
+                                          const float distance)
+{
+  if (!std::isfinite(midpoint[0]) || !std::isfinite(midpoint[1]) || !std::isfinite(distance) ||
+      distance < 0.0f)
+  {
+    return false;
+  }
+
+  GHOST_Rect bounds;
+  win->getClientBounds(bounds);
+  const float width = float(std::max(bounds.getWidth(), 1));
+  const float height = float(std::max(bounds.getHeight(), 1));
+  const float diagonal = float(std::hypot(width, height));
+  const float margin = std::max(32.0f, diagonal * touch_gesture_max_window_margin_factor);
+
+  if (midpoint[0] < -margin || midpoint[0] > width + margin || midpoint[1] < -margin ||
+      midpoint[1] > height + margin)
+  {
+    return false;
+  }
+  if (distance > diagonal * touch_gesture_max_distance_window_factor) {
+    return false;
+  }
+
+  return true;
+}
+
+static void touch_gesture_sample_filter(const GHOST_WindowWayland *win,
+                                        const float raw_midpoint[2],
+                                        const float raw_distance,
+                                        const float previous_midpoint[2],
+                                        const float previous_distance,
+                                        float r_midpoint[2],
+                                        float *r_distance)
+{
+  const float diagonal = touch_window_diagonal_get(win);
+  const float max_pan = std::clamp(diagonal * touch_gesture_max_pan_window_factor, 64.0f, 240.0f);
+  const float pan_delta[2] = {
+      raw_midpoint[0] - previous_midpoint[0],
+      raw_midpoint[1] - previous_midpoint[1],
+  };
+  const float pan_distance = float(std::hypot(pan_delta[0], pan_delta[1]));
+
+  r_midpoint[0] = raw_midpoint[0];
+  r_midpoint[1] = raw_midpoint[1];
+  if (pan_distance > max_pan) {
+    const float pan_scale = max_pan / pan_distance;
+    r_midpoint[0] = previous_midpoint[0] + pan_delta[0] * pan_scale;
+    r_midpoint[1] = previous_midpoint[1] + pan_delta[1] * pan_scale;
+  }
+
+  *r_distance = raw_distance;
+  if (previous_distance >= touch_pinch_min_distance && raw_distance >= touch_pinch_min_distance) {
+    const float scale = std::clamp(raw_distance / previous_distance,
+                                   1.0f / touch_gesture_max_scale_per_frame,
+                                   touch_gesture_max_scale_per_frame);
+    *r_distance = previous_distance * scale;
+  }
 }
 
 static void touch_context_click_events_append(std::unique_ptr<GHOST_Event> *touch_events,
@@ -5861,17 +5936,16 @@ static void touch_seat_handle_frame(void *data, wl_touch * /*touch*/)
     }
 
     if (seat->touch_state.gesture_active && seat->touch_state.gesture_motion_pending) {
-      constexpr float touch_pinch_min_distance = 5.0f;
-      constexpr float touch_pinch_scale_factor = 300.0f;
-
-      float midpoint[2];
-      float distance;
-      if (touch_seat_state_midpoint_and_distance_get(seat, win, midpoint, &distance)) {
+      float raw_midpoint[2];
+      float raw_distance;
+      if (touch_seat_state_midpoint_and_distance_get(seat, win, raw_midpoint, &raw_distance) &&
+          touch_gesture_sample_is_valid(win, raw_midpoint, raw_distance))
+      {
         if (seat->touch_state.gesture_tap_candidate) {
           const float midpoint_delta = float(
-              std::hypot(midpoint[0] - seat->touch_state.gesture_start_midpoint[0],
-                         midpoint[1] - seat->touch_state.gesture_start_midpoint[1]));
-          const float distance_delta = std::abs(distance -
+              std::hypot(raw_midpoint[0] - seat->touch_state.gesture_start_midpoint[0],
+                         raw_midpoint[1] - seat->touch_state.gesture_start_midpoint[1]));
+          const float distance_delta = std::abs(raw_distance -
                                                 seat->touch_state.gesture_start_distance);
           if ((seat->touch_state.gesture_event_time_ms - seat->touch_state.gesture_start_time_ms) >
                   touch_two_finger_tap_max_ms ||
@@ -5880,6 +5954,18 @@ static void touch_seat_handle_frame(void *data, wl_touch * /*touch*/)
           {
             seat->touch_state.gesture_tap_candidate = false;
           }
+        }
+
+        float midpoint[2] = {raw_midpoint[0], raw_midpoint[1]};
+        float distance = raw_distance;
+        if (!seat->touch_state.gesture_tap_candidate) {
+          touch_gesture_sample_filter(win,
+                                      raw_midpoint,
+                                      raw_distance,
+                                      seat->touch_state.gesture_midpoint,
+                                      seat->touch_state.gesture_distance,
+                                      midpoint,
+                                      &distance);
         }
 
         if (!seat->touch_state.gesture_tap_candidate && distance >= touch_pinch_min_distance &&

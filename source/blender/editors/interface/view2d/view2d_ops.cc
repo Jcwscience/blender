@@ -698,8 +698,10 @@ struct v2dViewPanZoomData {
 };
 
 static constexpr const char *view_pan_zoom_data_id = "view2d_pan_zoom";
+static constexpr float view_pan_zoom_max_event_zoom_factor = 1.5f;
+static constexpr float view_zoom_max_event_step = 0.25f;
 
-static float view_zoom_delta_to_factor(const View2D *v2d, const int delta)
+static float view_zoom_delta_to_step(const View2D *v2d, const int delta)
 {
   float zoomfac = 0.01f;
 
@@ -708,8 +710,25 @@ static float view_zoom_delta_to_factor(const View2D *v2d, const int delta)
     zoomfac = clamp_f(0.001f * v2d->maxzoom, 0.001f, 0.01f);
   }
 
-  const float view_size_fac = max_ff(1.0f - (2.0f * zoomfac * delta), 0.001f);
-  return 1.0f / view_size_fac;
+  return clamp_f(zoomfac * delta, -view_zoom_max_event_step, view_zoom_max_event_step);
+}
+
+static float view_zoom_delta_to_factor(const View2D *v2d, const int delta)
+{
+  const float view_size_fac = max_ff(1.0f - (2.0f * view_zoom_delta_to_step(v2d, delta)), 0.001f);
+  return clamp_f(1.0f / view_size_fac,
+                 1.0f / view_pan_zoom_max_event_zoom_factor,
+                 view_pan_zoom_max_event_zoom_factor);
+}
+
+static void view_pan_zoom_delta_sanitize(const ARegion *region, int pan_delta[2])
+{
+  const int max_delta[2] = {
+      max_ii(BLI_rcti_size_x(&region->winrct), 64),
+      max_ii(BLI_rcti_size_y(&region->winrct), 64),
+  };
+  pan_delta[0] = clamp_i(pan_delta[0], -max_delta[0], max_delta[0]);
+  pan_delta[1] = clamp_i(pan_delta[1], -max_delta[1], max_delta[1]);
 }
 
 static const wmTrackpadData *view_event_trackpad_data_get(const wmEvent *event)
@@ -1168,6 +1187,7 @@ static void view_pan_zoom_apply(bContext *C, v2dViewZoomData *vzd, const wmEvent
   int pan_delta[2] = {0, 0};
   if (trackpad_data) {
     copy_v2_v2_int(pan_delta, trackpad_data->pan_delta);
+    view_pan_zoom_delta_sanitize(region, pan_delta);
   }
 
   v2dViewPanZoomData *gesture_data = static_cast<v2dViewPanZoomData *>(
@@ -1311,16 +1331,10 @@ static wmOperatorStatus view_zoomdrag_invoke(bContext *C, wmOperator *op, const 
     vzd->lasty = event->prev_xy[1];
 
     float facx, facy;
-    float zoomfac = 0.01f;
-
-    /* Some view2d's (graph) don't have min/max zoom, or extreme ones. */
-    if (v2d->maxzoom > 0.0f) {
-      zoomfac = clamp_f(0.001f * v2d->maxzoom, 0.001f, 0.01f);
-    }
 
     if (event->type == MOUSEPAN) {
-      facx = zoomfac * WM_event_absolute_delta_x(event);
-      facy = zoomfac * WM_event_absolute_delta_y(event);
+      facx = view_zoom_delta_to_step(v2d, WM_event_absolute_delta_x(event));
+      facy = view_zoom_delta_to_step(v2d, WM_event_absolute_delta_y(event));
 
       if (U.uiflag & USER_ZOOM_INVERT) {
         facx *= -1.0f;
@@ -1328,7 +1342,7 @@ static wmOperatorStatus view_zoomdrag_invoke(bContext *C, wmOperator *op, const 
       }
     }
     else { /* MOUSEZOOM */
-      facx = facy = zoomfac * WM_event_absolute_delta_x(event);
+      facx = facy = view_zoom_delta_to_step(v2d, WM_event_absolute_delta_x(event));
     }
 
     /* Only respect user setting zoom axis if the view does not have any zoom restrictions

@@ -5783,9 +5783,12 @@ static wmTrackpadData *wm_event_trackpad_data_ensure(wmEvent *event)
   return data;
 }
 
-static void attach_trackpad_pan_data(wmEvent *event, const int pan_delta_x, const int pan_delta_y)
+static void attach_trackpad_pan_data(wmEvent *event,
+                                     const int pan_delta_x,
+                                     const int pan_delta_y,
+                                     const bool ensure_data)
 {
-  if (pan_delta_x == 0 && pan_delta_y == 0) {
+  if (!ensure_data && pan_delta_x == 0 && pan_delta_y == 0) {
     return;
   }
 
@@ -6195,7 +6198,7 @@ void wm_event_add_ghostevent(wmWindowManager *wm,
           event.type = MOUSEZOOM;
           delta[0] = -delta[0];
           delta[1] = -delta[1];
-          attach_trackpad_pan_data(&event, pd->panDeltaX, -pd->panDeltaY);
+          attach_trackpad_pan_data(&event, pd->panDeltaX, -pd->panDeltaY, true /* ensure_data */);
           break;
         case GHOST_kTrackpadEventSmartMagnify:
           event.type = MOUSESMARTZOOM;
