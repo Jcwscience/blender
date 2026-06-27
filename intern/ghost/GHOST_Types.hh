@@ -670,6 +670,10 @@ struct GHOST_TEventTrackpadData {
   int32_t deltaX;
   /** The y-delta (currently only for scroll subtype) of the trackpad event */
   int32_t deltaY;
+  /** The x-translation delta for trackpad magnify events that include panning. */
+  int32_t panDeltaX;
+  /** The y-translation delta for trackpad magnify events that include panning. */
+  int32_t panDeltaY;
   /** The delta is inverted from the device due to system preferences. */
   char isDirectionInverted;
 };

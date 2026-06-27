@@ -50,6 +50,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <optional>
 #include <string_view>
 #include <thread>
@@ -715,6 +716,12 @@ struct GWL_KeyRepeatPlayload {
   } key_data;
 };
 
+/** Data used to trigger a long-press touch context click. */
+struct GWL_TouchHoldPayload {
+  GWL_Seat *seat = nullptr;
+  uint64_t serial = 0;
+};
+
 /** Internal variables used to track grab-state. */
 struct GWL_SeatStateGrab {
   bool use_lock = false;
@@ -1201,11 +1208,17 @@ struct GWL_Seat {
   /**
    * This structure accumulates touch input that will be applied on the next *frame* event.
    *
-   * Currently only track one active contact point on the screen
-   * and map it to pointer motion and left-clicks.
-   * Multi-touch, pinching & swiping are not yet supported.
+   * A single active contact is mapped to pointer motion and left-clicks.
+   * Two active contacts are mapped to a pan/zoom gesture.
    */
   struct {
+    struct Contact {
+      bool active = false;
+      int32_t id = 0;
+      wl_fixed_t xy[2] = {0, 0};
+    };
+
+    Contact contacts[3];
     bool is_touching = false;
     uint32_t down_id = 0;
     bool down_pending = false;
@@ -1216,6 +1229,26 @@ struct GWL_Seat {
     uint64_t up_event_serial = WL_SERIAL_NONE;
     bool motion_pending = false;
     uint64_t motion_event_time_ms = 0;
+    bool hold_active = false;
+    bool hold_triggered = false;
+    uint64_t hold_serial = 0;
+    GHOST_ITimerTask *hold_timer = nullptr;
+    GWL_TouchHoldPayload hold_payload;
+    wl_fixed_t hold_xy[2] = {0, 0};
+    bool gesture_active = false;
+    bool gesture_motion_pending = false;
+    uint64_t gesture_event_time_ms = 0;
+    bool gesture_tap_candidate = false;
+    uint64_t gesture_start_time_ms = 0;
+    float gesture_start_midpoint[2] = {0.0f, 0.0f};
+    float gesture_start_distance = 0.0f;
+    float gesture_midpoint[2] = {0.0f, 0.0f};
+    float gesture_distance = 0.0f;
+    float gesture_pan_remainder[2] = {0.0f, 0.0f};
+    float gesture_scale_remainder = 0.0f;
+    bool context_click_pending = false;
+    uint64_t context_click_event_time_ms = 0;
+    float context_click_xy[2] = {0.0f, 0.0f};
   } touch_state;
 
 #ifdef USE_GNOME_CONFINE_HACK
@@ -5160,7 +5193,12 @@ static void gesture_pinch_handle_update(void *data,
 
   if (win) {
     const int event_xy[2] = {WL_FIXED_TO_INT_FOR_WINDOW_V2(win, seat->pointer.xy)};
-    if (scale_as_delta_px) {
+    const int pan_delta_xy[2] = {
+        wl_fixed_to_int(win->wl_fixed_to_window(dx)),
+        wl_fixed_to_int(win->wl_fixed_to_window(dy)),
+    };
+
+    if (scale_as_delta_px || pan_delta_xy[0] || pan_delta_xy[1]) {
       seat->system->pushEvent_maybe_pending(
           std::make_unique<GHOST_EventTrackpad>(event_ms,
                                                 win,
@@ -5169,7 +5207,9 @@ static void gesture_pinch_handle_update(void *data,
                                                 event_xy[1],
                                                 scale_as_delta_px,
                                                 0,
-                                                false));
+                                                false,
+                                                pan_delta_xy[0],
+                                                pan_delta_xy[1]));
     }
 
     if (rotation_as_delta_px) {
@@ -5279,6 +5319,183 @@ static const zwp_pointer_gesture_swipe_v1_listener gesture_swipe_listener = {
 static CLG_LogRef LOG_WL_TOUCH = {"ghost.wl.handle.touch"};
 #define LOG (&LOG_WL_TOUCH)
 
+static constexpr float touch_context_tap_move_threshold = 12.0f;
+static constexpr uint64_t touch_two_finger_tap_max_ms = 350;
+
+static int touch_seat_state_active_count(const GWL_Seat *seat)
+{
+  int count = 0;
+  for (const auto &contact : seat->touch_state.contacts) {
+    if (contact.active) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static int touch_seat_state_contact_index_from_id(const GWL_Seat *seat, const int32_t id)
+{
+  for (int i = 0; i < ARRAY_SIZE(seat->touch_state.contacts); i++) {
+    if (seat->touch_state.contacts[i].active && seat->touch_state.contacts[i].id == id) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static int touch_seat_state_contact_index_first_free(const GWL_Seat *seat)
+{
+  for (int i = 0; i < ARRAY_SIZE(seat->touch_state.contacts); i++) {
+    if (!seat->touch_state.contacts[i].active) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static bool touch_seat_state_two_contact_indices_get(const GWL_Seat *seat, int r_indices[2])
+{
+  int found = 0;
+  for (int i = 0; i < ARRAY_SIZE(seat->touch_state.contacts); i++) {
+    if (seat->touch_state.contacts[i].active) {
+      r_indices[found++] = i;
+      if (found == 2) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static void touch_window_xy_from_fixed(const GHOST_WindowWayland *win,
+                                       const wl_fixed_t xy[2],
+                                       float r_xy[2])
+{
+  r_xy[0] = float(wl_fixed_to_double(win->wl_fixed_to_window(xy[0])));
+  r_xy[1] = float(wl_fixed_to_double(win->wl_fixed_to_window(xy[1])));
+}
+
+static bool touch_seat_state_midpoint_and_distance_get(const GWL_Seat *seat,
+                                                       const GHOST_WindowWayland *win,
+                                                       float r_midpoint[2],
+                                                       float *r_distance)
+{
+  int contact_indices[2];
+  if (!touch_seat_state_two_contact_indices_get(seat, contact_indices)) {
+    return false;
+  }
+
+  float xy_a[2], xy_b[2];
+  touch_window_xy_from_fixed(win, seat->touch_state.contacts[contact_indices[0]].xy, xy_a);
+  touch_window_xy_from_fixed(win, seat->touch_state.contacts[contact_indices[1]].xy, xy_b);
+
+  r_midpoint[0] = (xy_a[0] + xy_b[0]) * 0.5f;
+  r_midpoint[1] = (xy_a[1] + xy_b[1]) * 0.5f;
+  *r_distance = float(std::hypot(xy_a[0] - xy_b[0], xy_a[1] - xy_b[1]));
+  return true;
+}
+
+static void touch_context_click_events_append(std::unique_ptr<GHOST_Event> *touch_events,
+                                              int *touch_events_num,
+                                              const uint64_t event_ms,
+                                              GHOST_WindowWayland *win,
+                                              const int event_xy[2])
+{
+  touch_events[(*touch_events_num)++] = std::make_unique<GHOST_EventCursor>(
+      event_ms, GHOST_kEventCursorMove, win, UNPACK2(event_xy), GHOST_TABLET_DATA_NONE);
+  touch_events[(*touch_events_num)++] = std::make_unique<GHOST_EventButton>(
+      event_ms, GHOST_kEventButtonDown, win, GHOST_kButtonMaskRight, GHOST_TABLET_DATA_NONE);
+  touch_events[(*touch_events_num)++] = std::make_unique<GHOST_EventButton>(
+      event_ms, GHOST_kEventButtonUp, win, GHOST_kButtonMaskRight, GHOST_TABLET_DATA_NONE);
+}
+
+static void touch_seat_hold_timer_fn(GHOST_ITimerTask *task, uint64_t /*time_ms*/)
+{
+  GWL_TouchHoldPayload *payload = static_cast<GWL_TouchHoldPayload *>(task->getUserData());
+  GWL_Seat *seat = payload->seat;
+  if (seat == nullptr) {
+    return;
+  }
+  if (seat->touch_state.hold_timer != task || seat->touch_state.hold_serial != payload->serial) {
+    return;
+  }
+  if (!seat->touch_state.hold_active || seat->touch_state.hold_triggered ||
+      !seat->touch_state.is_touching || seat->touch_state.up_pending ||
+      touch_seat_state_active_count(seat) != 1)
+  {
+    return;
+  }
+
+  wl_surface *wl_surface_focus = seat->touch.wl.surface_window;
+  if (!ghost_wl_surface_own_with_null_check(wl_surface_focus)) {
+    return;
+  }
+
+  GHOST_WindowWayland *win = ghost_wl_surface_user_data(wl_surface_focus);
+  const uint64_t event_ms = seat->system->getMilliSeconds();
+  const int event_xy[2] = {WL_FIXED_TO_INT_FOR_WINDOW_V2(win, seat->touch.xy)};
+
+  seat->touch_state.hold_active = false;
+  seat->touch_state.hold_triggered = true;
+  seat->touch_state.is_touching = false;
+  seat->touch_state.down_pending = false;
+  seat->touch_state.motion_pending = false;
+  seat->touch_state.motion_event_time_ms = 0;
+
+  seat->system->pushEvent_maybe_pending(std::make_unique<GHOST_EventCursor>(
+      event_ms, GHOST_kEventCursorMove, win, UNPACK2(event_xy), GHOST_TABLET_DATA_NONE));
+  if (seat->touch.buttons.get(GHOST_kButtonMaskLeft)) {
+    seat->touch.buttons.set(GHOST_kButtonMaskLeft, false);
+    seat->system->pushEvent_maybe_pending(std::make_unique<GHOST_EventButton>(
+        event_ms, GHOST_kEventButtonUp, win, GHOST_kButtonMaskLeft, GHOST_TABLET_DATA_NONE));
+  }
+  seat->system->pushEvent_maybe_pending(std::make_unique<GHOST_EventButton>(
+      event_ms, GHOST_kEventButtonDown, win, GHOST_kButtonMaskRight, GHOST_TABLET_DATA_NONE));
+  seat->system->pushEvent_maybe_pending(std::make_unique<GHOST_EventButton>(
+      event_ms, GHOST_kEventButtonUp, win, GHOST_kButtonMaskRight, GHOST_TABLET_DATA_NONE));
+}
+
+static void touch_seat_hold_timer_remove(GWL_Seat *seat)
+{
+#ifdef USE_EVENT_BACKGROUND_THREAD
+  std::lock_guard lock_timer_guard{*seat->system->timer_mutex};
+#endif
+  if (seat->touch_state.hold_timer == nullptr) {
+    return;
+  }
+  seat->system->key_repeat_timer_manager()->removeTimer(
+      static_cast<GHOST_TimerTask *>(seat->touch_state.hold_timer));
+  seat->touch_state.hold_timer = nullptr;
+}
+
+static void touch_seat_hold_timer_add(GWL_Seat *seat)
+{
+  constexpr uint64_t hold_delay_ms = 500;
+  constexpr uint64_t hold_timer_repeat_ms = uint64_t(24) * 60 * 60 * 1000;
+
+  touch_seat_hold_timer_remove(seat);
+
+#ifdef USE_EVENT_BACKGROUND_THREAD
+  std::lock_guard lock_timer_guard{*seat->system->timer_mutex};
+#endif
+  GHOST_SystemWayland *system = seat->system;
+  const uint64_t time_now = system->getMilliSeconds();
+  seat->touch_state.hold_payload.seat = seat;
+  seat->touch_state.hold_payload.serial = ++seat->touch_state.hold_serial;
+  GHOST_TimerTask *timer = new GHOST_TimerTask(time_now + hold_delay_ms,
+                                               hold_timer_repeat_ms,
+                                               touch_seat_hold_timer_fn,
+                                               &seat->touch_state.hold_payload);
+  seat->touch_state.hold_timer = timer;
+  system->key_repeat_timer_manager()->addTimer(timer);
+}
+
+static void touch_seat_hold_cancel(GWL_Seat *seat)
+{
+  touch_seat_hold_timer_remove(seat);
+  seat->touch_state.hold_active = false;
+}
+
 static void touch_seat_handle_down(void *data,
                                    wl_touch * /*touch*/,
                                    const uint32_t serial,
@@ -5299,19 +5516,68 @@ static void touch_seat_handle_down(void *data,
     return;
   }
 
-  /* Only track one point at a time.
-   * At some point *full* touch supported could be. */
-  if (seat->touch_state.is_touching) {
+  const int active_contacts = touch_seat_state_active_count(seat);
+  if (active_contacts >= 2) {
+    seat->touch_state.gesture_tap_candidate = false;
+    return;
+  }
+  if (active_contacts > 0 && seat->touch_state.hold_triggered) {
+    return;
+  }
+  if (active_contacts > 0 && seat->touch.wl.surface_window != surface) {
+    return;
+  }
+
+  const int contact_index = touch_seat_state_contact_index_first_free(seat);
+  if (contact_index == -1) {
     return;
   }
 
   const uint64_t event_ms = seat->system->ms_from_input_time(time);
+  seat->touch_state.contacts[contact_index].active = true;
+  seat->touch_state.contacts[contact_index].id = id;
+  seat->touch_state.contacts[contact_index].xy[0] = x;
+  seat->touch_state.contacts[contact_index].xy[1] = y;
 
   /* Set generic pointer state. */
   seat->touch.xy[0] = x;
   seat->touch.xy[1] = y;
   seat->touch.serial = serial;
   seat->touch.wl.surface_window = surface;
+
+  if (active_contacts == 1) {
+    touch_seat_hold_cancel(seat);
+    seat->touch_state.motion_pending = false;
+    seat->touch_state.down_pending = false;
+    seat->touch_state.is_touching = false;
+
+    if (seat->touch.buttons.get(GHOST_kButtonMaskLeft)) {
+      seat->touch_state.up_pending = true;
+      seat->touch_state.up_event_time_ms = event_ms;
+      seat->touch_state.up_event_serial = serial;
+    }
+
+    seat->touch_state.gesture_active = true;
+    seat->touch_state.gesture_motion_pending = false;
+    seat->touch_state.gesture_event_time_ms = 0;
+    seat->touch_state.gesture_tap_candidate = true;
+    seat->touch_state.gesture_start_time_ms = event_ms;
+    seat->touch_state.gesture_pan_remainder[0] = 0.0f;
+    seat->touch_state.gesture_pan_remainder[1] = 0.0f;
+    seat->touch_state.gesture_scale_remainder = 0.0f;
+
+    GHOST_WindowWayland *win = ghost_wl_surface_user_data(seat->touch.wl.surface_window);
+    if (!touch_seat_state_midpoint_and_distance_get(
+            seat, win, seat->touch_state.gesture_midpoint, &seat->touch_state.gesture_distance))
+    {
+      seat->touch_state.gesture_distance = 0.0f;
+    }
+    seat->touch_state.gesture_start_midpoint[0] = seat->touch_state.gesture_midpoint[0];
+    seat->touch_state.gesture_start_midpoint[1] = seat->touch_state.gesture_midpoint[1];
+    seat->touch_state.gesture_start_distance = seat->touch_state.gesture_distance;
+    win->cursor_shape_refresh();
+    return;
+  }
 
   /* Set the active pointer. */
   seat->cursor_source_serial = serial;
@@ -5324,6 +5590,11 @@ static void touch_seat_handle_down(void *data,
   seat->touch_state.down_pending = true;
   seat->touch_state.down_event_time_ms = event_ms;
   seat->touch_state.down_event_serial = serial;
+  seat->touch_state.hold_active = true;
+  seat->touch_state.hold_triggered = false;
+  seat->touch_state.hold_xy[0] = x;
+  seat->touch_state.hold_xy[1] = y;
+  touch_seat_hold_timer_add(seat);
 
   /* Signal the window manager to update the cursor shape
    * into whatever shape it considers correct for the touchscreen's pointer. */
@@ -5337,13 +5608,93 @@ static void touch_seat_handle_up(
   CLOG_DEBUG(LOG, "up");
   GWL_Seat *seat = static_cast<GWL_Seat *>(data);
 
-  /* Only track one contact point at a time. */
-  if (seat->touch_state.down_id != id) {
+  const int contact_index = touch_seat_state_contact_index_from_id(seat, id);
+  if (contact_index == -1) {
     return;
   }
 
   const uint64_t event_ms = seat->system->ms_from_input_time(time);
+  const bool was_single_touch = seat->touch_state.is_touching && seat->touch_state.down_id == id;
+
+  bool context_click_pending = false;
+  float context_click_xy[2] = {0.0f, 0.0f};
+  if (seat->touch_state.gesture_active && seat->touch_state.gesture_tap_candidate &&
+      (event_ms - seat->touch_state.gesture_start_time_ms) <= touch_two_finger_tap_max_ms)
+  {
+    wl_surface *wl_surface_focus = seat->touch.wl.surface_window;
+    if (ghost_wl_surface_own_with_null_check(wl_surface_focus)) {
+      GHOST_WindowWayland *win = ghost_wl_surface_user_data(wl_surface_focus);
+      float midpoint[2];
+      float distance;
+      if (touch_seat_state_midpoint_and_distance_get(seat, win, midpoint, &distance)) {
+        const float midpoint_delta = float(
+            std::hypot(midpoint[0] - seat->touch_state.gesture_start_midpoint[0],
+                       midpoint[1] - seat->touch_state.gesture_start_midpoint[1]));
+        const float distance_delta = std::abs(distance - seat->touch_state.gesture_start_distance);
+        if (midpoint_delta <= touch_context_tap_move_threshold &&
+            distance_delta <= touch_context_tap_move_threshold)
+        {
+          context_click_pending = true;
+          context_click_xy[0] = midpoint[0];
+          context_click_xy[1] = midpoint[1];
+        }
+      }
+    }
+  }
+
+  seat->touch_state.contacts[contact_index].active = false;
+
+  if (seat->touch_state.hold_triggered) {
+    if (touch_seat_state_active_count(seat) == 0) {
+      touch_seat_hold_timer_remove(seat);
+      seat->touch_state.hold_triggered = false;
+      seat->touch_state.hold_active = false;
+      seat->touch.wl.surface_window = nullptr;
+    }
+    return;
+  }
+
+  if (seat->touch_state.gesture_active) {
+    if (touch_seat_state_active_count(seat) < 2) {
+      if (context_click_pending) {
+        seat->touch_state.context_click_pending = true;
+        seat->touch_state.context_click_event_time_ms = event_ms;
+        seat->touch_state.context_click_xy[0] = context_click_xy[0];
+        seat->touch_state.context_click_xy[1] = context_click_xy[1];
+      }
+      seat->touch_state.gesture_active = false;
+      seat->touch_state.gesture_motion_pending = false;
+      seat->touch_state.gesture_event_time_ms = 0;
+      seat->touch_state.gesture_tap_candidate = false;
+      seat->touch_state.gesture_start_time_ms = 0;
+      seat->touch_state.gesture_start_midpoint[0] = 0.0f;
+      seat->touch_state.gesture_start_midpoint[1] = 0.0f;
+      seat->touch_state.gesture_start_distance = 0.0f;
+      seat->touch_state.gesture_distance = 0.0f;
+      seat->touch_state.gesture_pan_remainder[0] = 0.0f;
+      seat->touch_state.gesture_pan_remainder[1] = 0.0f;
+      seat->touch_state.gesture_scale_remainder = 0.0f;
+    }
+    if (touch_seat_state_active_count(seat) == 0 && !seat->touch_state.up_pending &&
+        !seat->touch_state.context_click_pending)
+    {
+      seat->touch.wl.surface_window = nullptr;
+    }
+    return;
+  }
+
+  if (!was_single_touch) {
+    if (touch_seat_state_active_count(seat) == 0 && !seat->touch_state.up_pending &&
+        !seat->touch_state.context_click_pending)
+    {
+      seat->touch.wl.surface_window = nullptr;
+    }
+    return;
+  }
+
+  touch_seat_hold_cancel(seat);
   seat->touch_state.is_touching = false;
+  seat->touch_state.hold_active = false;
   seat->touch_state.up_pending = true;
   seat->touch_state.up_event_time_ms = event_ms;
   seat->touch_state.up_event_serial = serial;
@@ -5359,17 +5710,48 @@ static void touch_seat_handle_motion(void *data,
   CLOG_DEBUG(LOG, "motion");
   GWL_Seat *seat = static_cast<GWL_Seat *>(data);
 
-  /* Only track one contact point at a time. */
-  if (seat->touch_state.down_id != id) {
+  const int contact_index = touch_seat_state_contact_index_from_id(seat, id);
+  if (contact_index == -1) {
     return;
   }
-  if (seat->touch_state.is_touching == false) {
+  seat->touch_state.contacts[contact_index].xy[0] = x;
+  seat->touch_state.contacts[contact_index].xy[1] = y;
+
+  const uint64_t event_ms = seat->system->ms_from_input_time(time);
+
+  if (seat->touch_state.hold_triggered) {
     return;
   }
 
-  const uint64_t event_ms = seat->system->ms_from_input_time(time);
+  if (seat->touch_state.gesture_active) {
+    if (touch_seat_state_active_count(seat) >= 2) {
+      seat->touch_state.gesture_event_time_ms = event_ms;
+      seat->touch_state.gesture_motion_pending = true;
+    }
+    return;
+  }
+
+  if (seat->touch_state.down_id != id || seat->touch_state.is_touching == false) {
+    return;
+  }
+
   seat->touch.xy[0] = x;
   seat->touch.xy[1] = y;
+
+  if (seat->touch_state.hold_active) {
+    wl_surface *wl_surface_focus = seat->touch.wl.surface_window;
+    if (ghost_wl_surface_own_with_null_check(wl_surface_focus)) {
+      GHOST_WindowWayland *win = ghost_wl_surface_user_data(wl_surface_focus);
+      float hold_xy[2], current_xy[2];
+      touch_window_xy_from_fixed(win, seat->touch_state.hold_xy, hold_xy);
+      touch_window_xy_from_fixed(win, seat->touch.xy, current_xy);
+      if (std::hypot(current_xy[0] - hold_xy[0], current_xy[1] - hold_xy[1]) >
+          touch_context_tap_move_threshold)
+      {
+        touch_seat_hold_cancel(seat);
+      }
+    }
+  }
 
   seat->touch_state.motion_event_time_ms = event_ms;
   seat->touch_state.motion_pending = true;
@@ -5382,7 +5764,7 @@ static void touch_seat_handle_frame(void *data, wl_touch * /*touch*/)
   if (wl_surface *wl_surface_focus = seat->touch.wl.surface_window) {
     GHOST_WindowWayland *win = ghost_wl_surface_user_data(wl_surface_focus);
 
-    std::unique_ptr<GHOST_Event> touch_events[3];
+    std::unique_ptr<GHOST_Event> touch_events[8];
     int touch_events_num = 0;
 
     /* For a finger move, generate a cursor move. */
@@ -5452,18 +5834,109 @@ static void touch_seat_handle_frame(void *data, wl_touch * /*touch*/)
       seat->touch_state.up_pending = false;
       seat->touch_state.up_event_time_ms = 0;
       seat->touch_state.up_event_serial = WL_SERIAL_NONE;
-      seat->touch.wl.surface_window = nullptr;
+      if (touch_seat_state_active_count(seat) == 0 && !seat->touch_state.gesture_active &&
+          !seat->touch_state.context_click_pending)
+      {
+        seat->touch.wl.surface_window = nullptr;
+      }
+    }
+
+    if (seat->touch_state.context_click_pending) {
+      const int event_xy[2] = {int(std::round(seat->touch_state.context_click_xy[0])),
+                               int(std::round(seat->touch_state.context_click_xy[1]))};
+      touch_context_click_events_append(touch_events,
+                                        &touch_events_num,
+                                        seat->touch_state.context_click_event_time_ms,
+                                        win,
+                                        event_xy);
+      seat->touch_state.context_click_pending = false;
+      seat->touch_state.context_click_event_time_ms = 0;
+      seat->touch_state.context_click_xy[0] = 0.0f;
+      seat->touch_state.context_click_xy[1] = 0.0f;
+      if (touch_seat_state_active_count(seat) == 0 && !seat->touch_state.gesture_active &&
+          !seat->touch_state.up_pending)
+      {
+        seat->touch.wl.surface_window = nullptr;
+      }
+    }
+
+    if (seat->touch_state.gesture_active && seat->touch_state.gesture_motion_pending) {
+      constexpr float touch_pinch_min_distance = 5.0f;
+      constexpr float touch_pinch_scale_factor = 300.0f;
+
+      float midpoint[2];
+      float distance;
+      if (touch_seat_state_midpoint_and_distance_get(seat, win, midpoint, &distance)) {
+        if (seat->touch_state.gesture_tap_candidate) {
+          const float midpoint_delta = float(
+              std::hypot(midpoint[0] - seat->touch_state.gesture_start_midpoint[0],
+                         midpoint[1] - seat->touch_state.gesture_start_midpoint[1]));
+          const float distance_delta = std::abs(distance -
+                                                seat->touch_state.gesture_start_distance);
+          if ((seat->touch_state.gesture_event_time_ms - seat->touch_state.gesture_start_time_ms) >
+                  touch_two_finger_tap_max_ms ||
+              midpoint_delta > touch_context_tap_move_threshold ||
+              distance_delta > touch_context_tap_move_threshold)
+          {
+            seat->touch_state.gesture_tap_candidate = false;
+          }
+        }
+
+        if (!seat->touch_state.gesture_tap_candidate && distance >= touch_pinch_min_distance &&
+            seat->touch_state.gesture_distance >= touch_pinch_min_distance)
+        {
+          float pan_delta_fl[2] = {
+              midpoint[0] - seat->touch_state.gesture_midpoint[0] +
+                  seat->touch_state.gesture_pan_remainder[0],
+              midpoint[1] - seat->touch_state.gesture_midpoint[1] +
+                  seat->touch_state.gesture_pan_remainder[1],
+          };
+          const int32_t pan_delta_x = int32_t(std::round(pan_delta_fl[0]));
+          const int32_t pan_delta_y = int32_t(std::round(pan_delta_fl[1]));
+          seat->touch_state.gesture_pan_remainder[0] = pan_delta_fl[0] - pan_delta_x;
+          seat->touch_state.gesture_pan_remainder[1] = pan_delta_fl[1] - pan_delta_y;
+
+          seat->touch_state.gesture_scale_remainder +=
+              ((distance / seat->touch_state.gesture_distance) - 1.0f) * touch_pinch_scale_factor;
+          const int32_t scale_delta = int32_t(
+              std::round(seat->touch_state.gesture_scale_remainder));
+          seat->touch_state.gesture_scale_remainder -= scale_delta;
+
+          if (pan_delta_x || pan_delta_y || scale_delta) {
+            touch_events[touch_events_num++] = std::make_unique<GHOST_EventTrackpad>(
+                seat->touch_state.gesture_event_time_ms,
+                win,
+                GHOST_kTrackpadEventMagnify,
+                int32_t(std::round(midpoint[0])),
+                int32_t(std::round(midpoint[1])),
+                scale_delta,
+                0,
+                false,
+                pan_delta_x,
+                pan_delta_y);
+          }
+        }
+
+        if (!seat->touch_state.gesture_tap_candidate) {
+          seat->touch_state.gesture_midpoint[0] = midpoint[0];
+          seat->touch_state.gesture_midpoint[1] = midpoint[1];
+          seat->touch_state.gesture_distance = distance;
+        }
+      }
+
+      seat->touch_state.gesture_motion_pending = false;
+      seat->touch_state.gesture_event_time_ms = 0;
     }
 
     GHOST_ASSERT(touch_events_num <= ARRAY_SIZE(touch_events), "Buffer overflow");
 
     /* Ensure events are ordered in time. */
     if (touch_events_num > 1) [[unlikely]] {
-      std::ranges::sort(std::span(touch_events, touch_events_num),
-                        [](const std::unique_ptr<GHOST_Event> &event_a,
-                           const std::unique_ptr<GHOST_Event> &event_b) {
-                          return event_a->getTime() < event_b->getTime();
-                        });
+      std::ranges::stable_sort(std::span(touch_events, touch_events_num),
+                               [](const std::unique_ptr<GHOST_Event> &event_a,
+                                  const std::unique_ptr<GHOST_Event> &event_b) {
+                                 return event_a->getTime() < event_b->getTime();
+                               });
     }
 
     for (int i = 0; i < touch_events_num; i++) {
@@ -5472,10 +5945,38 @@ static void touch_seat_handle_frame(void *data, wl_touch * /*touch*/)
   }
 }
 
-static void touch_seat_handle_cancel(void * /*data*/, wl_touch * /*wl_touch*/)
+static void touch_seat_handle_cancel(void *data, wl_touch * /*wl_touch*/)
 {
 
   CLOG_DEBUG(LOG, "cancel");
+  GWL_Seat *seat = static_cast<GWL_Seat *>(data);
+  touch_seat_hold_timer_remove(seat);
+  for (auto &contact : seat->touch_state.contacts) {
+    contact.active = false;
+  }
+  seat->touch_state.is_touching = false;
+  seat->touch_state.down_pending = false;
+  seat->touch_state.up_pending = false;
+  seat->touch_state.motion_pending = false;
+  seat->touch_state.hold_active = false;
+  seat->touch_state.hold_triggered = false;
+  seat->touch_state.gesture_active = false;
+  seat->touch_state.gesture_motion_pending = false;
+  seat->touch_state.gesture_event_time_ms = 0;
+  seat->touch_state.gesture_tap_candidate = false;
+  seat->touch_state.gesture_start_time_ms = 0;
+  seat->touch_state.gesture_start_midpoint[0] = 0.0f;
+  seat->touch_state.gesture_start_midpoint[1] = 0.0f;
+  seat->touch_state.gesture_start_distance = 0.0f;
+  seat->touch_state.gesture_distance = 0.0f;
+  seat->touch_state.gesture_pan_remainder[0] = 0.0f;
+  seat->touch_state.gesture_pan_remainder[1] = 0.0f;
+  seat->touch_state.gesture_scale_remainder = 0.0f;
+  seat->touch_state.context_click_pending = false;
+  seat->touch_state.context_click_event_time_ms = 0;
+  seat->touch_state.context_click_xy[0] = 0.0f;
+  seat->touch_state.context_click_xy[1] = 0.0f;
+  seat->touch.wl.surface_window = nullptr;
 }
 
 static void touch_seat_handle_shape(void * /*data*/,
@@ -7121,6 +7622,7 @@ static void gwl_seat_capability_touch_disable(GWL_Seat *seat)
   if (!seat->wl.touch) {
     return;
   }
+  touch_seat_hold_timer_remove(seat);
   wl_touch_destroy(seat->wl.touch);
   seat->wl.touch = nullptr;
 }

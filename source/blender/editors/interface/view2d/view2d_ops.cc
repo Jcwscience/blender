@@ -686,6 +686,40 @@ struct v2dViewZoomData {
   bool own_cursor;
 };
 
+struct v2dViewPanZoomData {
+  ARegion *region;
+  View2D *v2d;
+
+  rctf cur_start;
+  float anchor_view[2];
+  float midpoint_region_start[2];
+  float pan_region[2];
+  float zoom_factor;
+};
+
+static constexpr const char *view_pan_zoom_data_id = "view2d_pan_zoom";
+
+static float view_zoom_delta_to_factor(const View2D *v2d, const int delta)
+{
+  float zoomfac = 0.01f;
+
+  /* Some View2D's (graph) don't have min/max zoom, or have extreme ones. */
+  if (v2d->maxzoom > 0.0f) {
+    zoomfac = clamp_f(0.001f * v2d->maxzoom, 0.001f, 0.01f);
+  }
+
+  const float view_size_fac = max_ff(1.0f - (2.0f * zoomfac * delta), 0.001f);
+  return 1.0f / view_size_fac;
+}
+
+static const wmTrackpadData *view_event_trackpad_data_get(const wmEvent *event)
+{
+  if (event->custom != EVT_DATA_TRACKPAD) {
+    return nullptr;
+  }
+  return static_cast<const wmTrackpadData *>(event->customdata);
+}
+
 /**
  * Clamp by convention rather than locking flags,
  * for ndof and +/- keys
@@ -1124,6 +1158,95 @@ static void view_zoomdrag_apply(bContext *C, wmOperator *op)
   view2d_sync(CTX_wm_screen(C), CTX_wm_area(C), v2d, V2D_LOCK_COPY);
 }
 
+static void view_pan_zoom_apply(bContext *C, v2dViewZoomData *vzd, const wmEvent *event)
+{
+  wmWindow *win = CTX_wm_window(C);
+  ARegion *region = vzd->region;
+  View2D *v2d = vzd->v2d;
+
+  const wmTrackpadData *trackpad_data = view_event_trackpad_data_get(event);
+  int pan_delta[2] = {0, 0};
+  if (trackpad_data) {
+    copy_v2_v2_int(pan_delta, trackpad_data->pan_delta);
+  }
+
+  v2dViewPanZoomData *gesture_data = static_cast<v2dViewPanZoomData *>(
+      WM_event_consecutive_data_get(win, view_pan_zoom_data_id));
+  if ((event->flag & WM_EVENT_IS_CONSECUTIVE) == 0 || gesture_data == nullptr ||
+      gesture_data->region != region || gesture_data->v2d != v2d)
+  {
+    gesture_data = MEM_new_zeroed<v2dViewPanZoomData>("View2D Pan/Zoom Data");
+    gesture_data->region = region;
+    gesture_data->v2d = v2d;
+    gesture_data->cur_start = v2d->cur;
+    gesture_data->zoom_factor = 1.0f;
+
+    gesture_data->midpoint_region_start[0] = float(event->mval[0] - pan_delta[0]);
+    gesture_data->midpoint_region_start[1] = float(event->mval[1] - pan_delta[1]);
+    view2d_region_to_view(v2d,
+                          gesture_data->midpoint_region_start[0],
+                          gesture_data->midpoint_region_start[1],
+                          &gesture_data->anchor_view[0],
+                          &gesture_data->anchor_view[1]);
+
+    WM_event_consecutive_data_set(win, view_pan_zoom_data_id, gesture_data);
+  }
+
+  gesture_data->pan_region[0] += pan_delta[0];
+  gesture_data->pan_region[1] += pan_delta[1];
+  gesture_data->zoom_factor *= view_zoom_delta_to_factor(v2d, WM_event_absolute_delta_x(event));
+
+  rctf cur_new = gesture_data->cur_start;
+  float size_new[2] = {BLI_rctf_size_x(&gesture_data->cur_start),
+                       BLI_rctf_size_y(&gesture_data->cur_start)};
+
+  if ((v2d->keepzoom & V2D_LOCKZOOM_X) == 0) {
+    size_new[0] /= gesture_data->zoom_factor;
+  }
+  if ((v2d->keepzoom & V2D_LOCKZOOM_Y) == 0) {
+    size_new[1] /= gesture_data->zoom_factor;
+  }
+
+  const float midpoint_region_current[2] = {
+      gesture_data->midpoint_region_start[0] + gesture_data->pan_region[0],
+      gesture_data->midpoint_region_start[1] + gesture_data->pan_region[1],
+  };
+
+  if ((v2d->keepofs & V2D_LOCKOFS_X) == 0) {
+    const float anchor_fac = (midpoint_region_current[0] - v2d->mask.xmin) /
+                             float(BLI_rcti_size_x(&v2d->mask));
+    cur_new.xmin = gesture_data->anchor_view[0] - (anchor_fac * size_new[0]);
+    cur_new.xmax = cur_new.xmin + size_new[0];
+  }
+  else if ((v2d->keepzoom & V2D_LOCKZOOM_X) == 0) {
+    cur_new.xmax = cur_new.xmin + size_new[0];
+  }
+
+  if ((v2d->keepofs & V2D_LOCKOFS_Y) == 0) {
+    const float anchor_fac = (midpoint_region_current[1] - v2d->mask.ymin) /
+                             float(BLI_rcti_size_y(&v2d->mask));
+    cur_new.ymin = gesture_data->anchor_view[1] - (anchor_fac * size_new[1]);
+    cur_new.ymax = cur_new.ymin + size_new[1];
+  }
+  else if ((v2d->keepzoom & V2D_LOCKZOOM_Y) == 0) {
+    cur_new.ymax = cur_new.ymin + size_new[1];
+  }
+
+  const int snap_test = ED_region_snap_size_test(region);
+  v2d->cur = cur_new;
+
+  view2d_curRect_changed(C, v2d);
+
+  if (ED_region_snap_size_apply(region, snap_test)) {
+    ScrArea *area = CTX_wm_area(C);
+    ED_area_tag_redraw(area);
+    WM_event_add_notifier(C, NC_SCREEN | NA_EDITED, nullptr);
+  }
+
+  ED_region_tag_redraw_no_rebuild(region);
+  view2d_sync(CTX_wm_screen(C), CTX_wm_area(C), v2d, V2D_LOCK_COPY);
+}
+
 /* Cleanup temp custom-data. */
 static void view_zoomdrag_exit(bContext *C, wmOperator *op)
 {
@@ -1173,6 +1296,14 @@ static wmOperatorStatus view_zoomdrag_invoke(bContext *C, wmOperator *op, const 
     /* Store initial mouse position (in view space). */
     view2d_region_to_view(&region->v2d, event->mval[0], event->mval[1], &vzd->mx_2d, &vzd->my_2d);
     vzd->zoom_to_mouse_pos = true;
+  }
+
+  if (event->type == MOUSEZOOM && (view_event_trackpad_data_get(event) ||
+                                   WM_event_consecutive_data_get(window, view_pan_zoom_data_id)))
+  {
+    view_pan_zoom_apply(C, vzd, event);
+    view_zoomdrag_exit(C, op);
+    return OPERATOR_FINISHED;
   }
 
   if (ELEM(event->type, MOUSEZOOM, MOUSEPAN)) {

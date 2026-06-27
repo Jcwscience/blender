@@ -844,6 +844,8 @@ struct wmEvent {
    * - #EVT_FILESELECT: uses #wmOperator.
    * - #EVT_XR_ACTION: uses #wmXrActionData (also #wmEvent::custom == #EVT_DATA_XR).
    * - #NDOF_MOTION: uses #wmNDOFMotionData (also #wmEvent::custom == #EVT_DATA_NDOF_MOTION).
+   * - #MOUSEZOOM: optionally uses #wmTrackpadData
+   *   (also #wmEvent::custom == #EVT_DATA_TRACKPAD).
    * - #TIMER: uses #wmTimer (also #wmEvent::custom == #EVT_DATA_TIMER).
    */
   void *customdata;
@@ -932,6 +934,11 @@ struct wmNDOFMotionData {
   wmProgress progress;
 };
 #endif /* WITH_INPUT_NDOF */
+
+struct wmTrackpadData {
+  /** Translation delta of the gesture centroid in window/screen pixels. */
+  int pan_delta[2];
+};
 
 #ifdef WITH_XR_OPENXR
 /** Similar to #GHOST_XrPose. */

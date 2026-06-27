@@ -5770,6 +5770,30 @@ static void attach_ndof_data(wmEvent *event, const GHOST_TEventNDOFMotionData *g
 }
 #endif /* WITH_INPUT_NDOF */
 
+static wmTrackpadData *wm_event_trackpad_data_ensure(wmEvent *event)
+{
+  if (event->custom == EVT_DATA_TRACKPAD) {
+    return static_cast<wmTrackpadData *>(event->customdata);
+  }
+
+  wmTrackpadData *data = MEM_new_zeroed<wmTrackpadData>("Custom-data Trackpad");
+  event->custom = EVT_DATA_TRACKPAD;
+  event->customdata = data;
+  event->customdata_free = true;
+  return data;
+}
+
+static void attach_trackpad_pan_data(wmEvent *event, const int pan_delta_x, const int pan_delta_y)
+{
+  if (pan_delta_x == 0 && pan_delta_y == 0) {
+    return;
+  }
+
+  wmTrackpadData *data = wm_event_trackpad_data_ensure(event);
+  data->pan_delta[0] = pan_delta_x;
+  data->pan_delta[1] = pan_delta_y;
+}
+
 /* Imperfect but probably usable... draw/enable drags to other windows. */
 static wmWindow *wm_event_cursor_other_windows(wmWindowManager *wm, wmWindow *win, wmEvent *event)
 {
@@ -5904,7 +5928,7 @@ static wmEvent *wm_event_add_mousemove_to_head(wmWindow *win)
   return event_new;
 }
 
-static wmEvent *wm_event_add_trackpad(wmWindow *win, const wmEvent *event, int deltax, int deltay)
+static wmEvent *wm_event_add_trackpad(wmWindow *win, wmEvent *event, int deltax, int deltay)
 {
   /* Ignore in between trackpad events for performance, we only need high accuracy
    * for painting with mouse moves, for navigation using the accumulated value is ok. */
@@ -5912,6 +5936,14 @@ static wmEvent *wm_event_add_trackpad(wmWindow *win, const wmEvent *event, int d
   if (event_last && event_last->type == event->type) {
     deltax += event_last->xy[0] - event_last->prev_xy[0];
     deltay += event_last->xy[1] - event_last->prev_xy[1];
+
+    if (event_last->custom == EVT_DATA_TRACKPAD) {
+      const wmTrackpadData *last_trackpad_data = static_cast<const wmTrackpadData *>(
+          event_last->customdata);
+      wmTrackpadData *trackpad_data = wm_event_trackpad_data_ensure(event);
+      trackpad_data->pan_delta[0] += last_trackpad_data->pan_delta[0];
+      trackpad_data->pan_delta[1] += last_trackpad_data->pan_delta[1];
+    }
 
     wm_event_free_last(win);
   }
@@ -6163,6 +6195,7 @@ void wm_event_add_ghostevent(wmWindowManager *wm,
           event.type = MOUSEZOOM;
           delta[0] = -delta[0];
           delta[1] = -delta[1];
+          attach_trackpad_pan_data(&event, pd->panDeltaX, -pd->panDeltaY);
           break;
         case GHOST_kTrackpadEventSmartMagnify:
           event.type = MOUSESMARTZOOM;

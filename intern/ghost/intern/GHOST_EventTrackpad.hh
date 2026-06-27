@@ -31,7 +31,9 @@ class GHOST_EventTrackpad : public GHOST_Event {
                       int32_t y,
                       int32_t deltaX,
                       int32_t deltaY,
-                      bool isDirectionInverted)
+                      bool isDirectionInverted,
+                      int32_t panDeltaX = 0,
+                      int32_t panDeltaY = 0)
       : GHOST_Event(msec, GHOST_kEventTrackpad, window)
   {
     trackpad_event_data_.subtype = subtype;
@@ -39,6 +41,8 @@ class GHOST_EventTrackpad : public GHOST_Event {
     trackpad_event_data_.y = y;
     trackpad_event_data_.deltaX = deltaX;
     trackpad_event_data_.deltaY = deltaY;
+    trackpad_event_data_.panDeltaX = panDeltaX;
+    trackpad_event_data_.panDeltaY = panDeltaY;
     trackpad_event_data_.isDirectionInverted = isDirectionInverted;
     data_ = &trackpad_event_data_;
   }
