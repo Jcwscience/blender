@@ -755,6 +755,8 @@ enum eWM_EventFlag {
    * even when the threshold has not been met.
    */
   WM_EVENT_FORCE_DRAG_THRESHOLD = (1 << 3),
+  WM_EVENT_TOUCH = (1 << 4),
+  WM_EVENT_TOUCH_MENU = (1 << 5),
 };
 ENUM_OPERATORS(eWM_EventFlag);
 
@@ -846,6 +848,10 @@ struct wmEvent {
   wmTabletData tablet;
 
   eWM_EventFlag flag;
+  /* Native touch data is inline so queued events own their complete payload. */
+  int touch_id;
+  int touch_phase;
+  double touch_time;
 
   /* Custom data. */
 

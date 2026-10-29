@@ -23,6 +23,7 @@
 
 #include "BLI_lasso_2d.hh"
 #include "BLI_listbase.hh"
+#include "BLI_math_geom_c.hh"
 #include "BLI_math_vector_c.hh"
 #include "BLI_rect.hh"
 #include "BLI_resource_scope.hh"
@@ -172,6 +173,42 @@ static bool is_position_over_node_or_socket(SpaceNode &snode, ARegion &region, c
     return true;
   }
   return false;
+}
+
+bool touch_is_empty_canvas(const bContext *C, ARegion &region, const int xy[2])
+{
+  SpaceNode *snode = CTX_wm_space_node(C);
+  if (!snode || !snode->edittree || !BKE_id_is_editable(CTX_data_main(C), &snode->edittree->id)) {
+    return false;
+  }
+  if (!BLI_rcti_isect_pt(&region.v2d.mask, xy[0] - region.winrct.xmin, xy[1] - region.winrct.ymin))
+  {
+    return false;
+  }
+  float2 mouse;
+  ui::view2d_region_to_view(
+      &region.v2d, xy[0] - region.winrct.xmin, xy[1] - region.winrct.ymin, &mouse.x, &mouse.y);
+  for (const bNode *node : snode->edittree->all_nodes()) {
+    /* Frames count as occupied, including their interior. */
+    if (BLI_rctf_isect_pt_v(&node->runtime->draw_bounds, mouse)) {
+      return false;
+    }
+  }
+  if (node_find_indicated_socket(*snode, region, mouse, SOCK_IN | SOCK_OUT)) {
+    return false;
+  }
+  const float radius = 12 * UI_SCALE_FAC * BLI_rctf_size_x(&region.v2d.cur) /
+                       std::max(1, BLI_rcti_size_x(&region.v2d.mask));
+  for (const bNodeLink &link : snode->edittree->links) {
+    std::array<float2, NODE_LINK_RESOL + 1> coords;
+    node_link_bezier_points_evaluated(link, coords);
+    for (int i = 1; i <= NODE_LINK_RESOL; i++) {
+      if (dist_squared_to_line_segment_v2(mouse, coords[i - 1], coords[i]) < radius * radius) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 static bool is_event_over_node_or_socket(const bContext &C, const wmEvent &event)

@@ -96,6 +96,7 @@ enum wmEventType : int16_t {
   /* Tablet/Pen Specific Events. */
   TABLET_STYLUS = 0x001a, /* 26 */
   TABLET_ERASER = 0x001b, /* 27 */
+  EVT_TOUCH = 0x001c,     /* Internal native contact; not a keymap event. */
 
 /* *** Start of keyboard codes. *** */
 

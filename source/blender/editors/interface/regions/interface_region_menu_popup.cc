@@ -896,6 +896,16 @@ void popup_block_close(bContext *C, wmWindow *win, Block *block)
   ED_workspace_status_text(C, nullptr);
 }
 
+bool popup_block_exists(const bScreen *screen)
+{
+  for (const ARegion &region : screen->regionbase) {
+    if (!region.runtime->uiblocks.is_empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool popup_block_name_exists(const bScreen *screen, const StringRef name)
 {
   for (const ARegion &region : screen->regionbase) {

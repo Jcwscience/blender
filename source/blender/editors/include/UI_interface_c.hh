@@ -1088,6 +1088,8 @@ void uiPupBlockOperator(bContext *C,
 void popup_block_close(bContext *C, wmWindow *win, Block *block);
 
 bool popup_block_name_exists(const bScreen *screen, StringRef name);
+/** True for interactive popups, excluding tooltips. */
+bool popup_block_exists(const bScreen *screen);
 
 /* Blocks
  *

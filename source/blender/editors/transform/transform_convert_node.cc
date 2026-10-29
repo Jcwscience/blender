@@ -31,6 +31,7 @@
 #include "transform_snap.hh"
 
 #include "WM_api.hh"
+#include "wm_touch.hh"
 
 namespace blender::ed::transform {
 
@@ -41,6 +42,7 @@ struct TransCustomDataNode {
   rctf viewrect_prev{};
 
   bool is_new_node = false;
+  bool touch_placement = false;
 
   Map<bNode *, bNode *> old_parent_by_detached_node;
 };
@@ -165,6 +167,12 @@ static void createTransNodeData(bContext * /*C*/, TransInfo *t)
                        NODE_EDGE_PAN_ZOOM_INFLUENCE);
   customdata->viewrect_prev = customdata->edgepan_data.initial_rect;
   customdata->is_new_node = t->remove_on_cancel;
+  customdata->touch_placement = t->remove_on_cancel &&
+                                wm_touch_node_placement_active(CTX_wm_window(t->context));
+  if (customdata->touch_placement) {
+    /* A preview must stay still while fingers navigate the canvas. */
+    t->options &= ~CTX_VIEW2D_EDGE_PAN;
+  }
 
   if (t->region) {
     space_node::node_insert_on_link_flags_set(
@@ -346,6 +354,11 @@ static void flushTransNodes(TransInfo *t)
 
       /* Weirdo - but the node system is a mix of free 2d elements and DPI sensitive UI. */
       loc /= dpi_fac;
+      if (customdata->touch_placement && t->state != TRANS_CANCEL) {
+        /* Touch placement is absolute, including near canvas edges and after pinch zoom. */
+        ui::view2d_region_to_view(&t->region->v2d, t->mval[0], t->mval[1], &loc.x, &loc.y);
+        loc /= dpi_fac;
+      }
 
       if (node->is_frame()) {
         const float2 delta = loc - float2(node->location);

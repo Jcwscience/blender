@@ -13,6 +13,7 @@
 #include "GHOST_EventCursor.hh"
 #include "GHOST_EventDragnDrop.hh"
 #include "GHOST_EventKey.hh"
+#include "GHOST_EventTouch.hh"
 #include "GHOST_EventTrackpad.hh"
 #include "GHOST_EventWheel.hh"
 #include "GHOST_PathUtils.hh"
@@ -20,6 +21,7 @@
 #include "GHOST_WaylandUtils.hh"
 #include "GHOST_WindowManager.hh"
 #include "GHOST_utildefines.hh"
+#include <map>
 
 #ifdef WITH_OPENGL_BACKEND
 #  include "GHOST_ContextEGL.hh"
@@ -1202,6 +1204,12 @@ struct GWL_Seat {
    *   nor anything relating to the cursor buffer scale.
    */
   GWL_SeatStatePointer touch;
+  /* Native window contacts are separate from the single-pointer CSD resize path. */
+  struct {
+    wl_surface *surface = nullptr;
+    std::map<int32_t, GHOST_TEventTouchData> contacts;
+    std::vector<std::unique_ptr<GHOST_Event>> pending;
+  } touch_native;
 
   GWL_SeatStateKeyboard keyboard;
 
@@ -5697,36 +5705,24 @@ static void touch_seat_handle_down(void *data,
     return;
   }
 
-  /* Only track one point at a time.
-   * At some point *full* touch supported could be. */
-  if (seat->touch_state.is_touching) {
+  /* Keep all contacts, and submit them in protocol order at wl_touch.frame. */
+  if (seat->touch_native.surface && seat->touch_native.surface != surface) {
     return;
   }
-
-  const uint64_t event_ms = seat->system->ms_from_input_time(time);
-
-  /* Set generic pointer state. */
+  seat->touch_native.surface = surface;
   seat->touch.xy[0] = x;
   seat->touch.xy[1] = y;
-  seat->touch.serial = serial;
   gwl_seat_state_pointer_surface_window_set(&seat->touch, surface);
-
-  /* Set the active pointer. */
+  seat->touch.serial = serial;
   seat->cursor_source_serial = serial;
-
-  /* Set touch-tracking state. */
-  seat->touch_state.is_touching = true;
-  seat->touch_state.down_id = id;
-  seat->touch_state.motion_pending = true;
-  seat->touch_state.motion_event_time_ms = event_ms;
-  seat->touch_state.down_pending = true;
-  seat->touch_state.down_event_time_ms = event_ms;
-  seat->touch_state.down_event_serial = serial;
-
-  /* Signal the window manager to update the cursor shape
-   * into whatever shape it considers correct for the touchscreen's pointer. */
-  GHOST_WindowWayland *win = ghost_wl_surface_user_data(seat->touch.wl.surface_window);
-  win->cursor_shape_refresh();
+  GHOST_WindowWayland *touch_win = ghost_wl_surface_user_data(surface);
+  touch_win->cursor_shape_refresh();
+  const wl_fixed_t native_pos[2] = {x, y};
+  const int native_xy[2] = {WL_FIXED_TO_INT_FOR_WINDOW_V2(touch_win, native_pos)};
+  GHOST_TEventTouchData contact{id, native_xy[0], native_xy[1], GHOST_TTouchPhase::Down};
+  seat->touch_native.contacts[id] = contact;
+  seat->touch_native.pending.push_back(std::make_unique<GHOST_EventTouch>(
+      seat->system->ms_from_input_time(time), touch_win, contact));
 }
 
 static void touch_seat_handle_up(
@@ -5735,6 +5731,19 @@ static void touch_seat_handle_up(
   CLOG_DEBUG(LOG, "up");
   GWL_Seat *seat = static_cast<GWL_Seat *>(data);
 
+  if (seat->touch_native.surface) {
+    auto it = seat->touch_native.contacts.find(id);
+    if (it != seat->touch_native.contacts.end()) {
+      auto contact = it->second;
+      contact.phase = GHOST_TTouchPhase::Up;
+      seat->touch_native.pending.push_back(std::make_unique<GHOST_EventTouch>(
+          seat->system->ms_from_input_time(time),
+          ghost_wl_surface_user_data(seat->touch_native.surface),
+          contact));
+      seat->touch_native.contacts.erase(it);
+    }
+    return;
+  }
   /* Only track one contact point at a time. */
   if (seat->touch_state.down_id != id) {
     return;
@@ -5757,6 +5766,20 @@ static void touch_seat_handle_motion(void *data,
   CLOG_DEBUG(LOG, "motion");
   GWL_Seat *seat = static_cast<GWL_Seat *>(data);
 
+  if (seat->touch_native.surface) {
+    auto it = seat->touch_native.contacts.find(id);
+    if (it != seat->touch_native.contacts.end()) {
+      GHOST_WindowWayland *win = ghost_wl_surface_user_data(seat->touch_native.surface);
+      seat->touch.xy[0] = x;
+      seat->touch.xy[1] = y;
+      const wl_fixed_t pos[2] = {x, y};
+      const int xy[2] = {WL_FIXED_TO_INT_FOR_WINDOW_V2(win, pos)};
+      it->second = {id, xy[0], xy[1], GHOST_TTouchPhase::Motion};
+      seat->touch_native.pending.push_back(std::make_unique<GHOST_EventTouch>(
+          seat->system->ms_from_input_time(time), win, it->second));
+    }
+    return;
+  }
   /* Only track one contact point at a time. */
   if (seat->touch_state.down_id != id) {
     return;
@@ -5819,6 +5842,16 @@ static void touch_seat_handle_frame(void *data, wl_touch * /*touch*/)
 {
   CLOG_DEBUG(LOG, "frame");
   GWL_Seat *seat = static_cast<GWL_Seat *>(data);
+  if (seat->touch_native.surface) {
+    for (auto &event : seat->touch_native.pending) {
+      seat->system->pushEvent_maybe_pending(std::move(event));
+    }
+    seat->touch_native.pending.clear();
+    if (seat->touch_native.contacts.empty()) {
+      seat->touch_native.surface = nullptr;
+    }
+    return;
+  }
 
 #ifdef WITH_GHOST_CSD
   if (wl_surface *wl_surface_focus = seat->touch.wl.surface_window_csd_margin) {
@@ -5923,9 +5956,15 @@ static void touch_seat_handle_frame(void *data, wl_touch * /*touch*/)
 static void touch_seat_handle_cancel(void *data, wl_touch * /*wl_touch*/)
 {
   CLOG_DEBUG(LOG, "cancel");
-
-#ifdef WITH_GHOST_CSD
   GWL_Seat *seat = static_cast<GWL_Seat *>(data);
+  if (seat->touch_native.surface) {
+    seat->system->pushEvent_maybe_pending(std::make_unique<GHOST_EventTouch>(
+        seat->system->getMilliSeconds(),
+        ghost_wl_surface_user_data(seat->touch_native.surface),
+        GHOST_TEventTouchData{0, 0, 0, GHOST_TTouchPhase::Cancel}));
+    seat->touch_native = {};
+  }
+#ifdef WITH_GHOST_CSD
   /* Starting a border resize cancels the touch (no further events arrive),
    * reset tracking so new contact points aren't ignored.
    * Cancellation with a window surface focused is left as-is,
@@ -7669,6 +7708,7 @@ static void gwl_seat_capability_touch_disable(GWL_Seat *seat)
   if (!seat->wl.touch) {
     return;
   }
+  touch_seat_handle_cancel(seat, seat->wl.touch);
   wl_touch_destroy(seat->wl.touch);
   seat->wl.touch = nullptr;
 }
@@ -11350,6 +11390,10 @@ bool GHOST_SystemWayland::window_surface_unref(const wl_surface *wl_surface)
     SURFACE_CLEAR_PTR(seat->pointer.wl.surface_window);
     SURFACE_CLEAR_PTR(seat->tablet.wl.surface_window);
     SURFACE_CLEAR_PTR(seat->touch.wl.surface_window);
+    if (seat->touch_native.surface == wl_surface) {
+      seat->touch_native = {};
+      changed = true;
+    }
 #ifdef WITH_GHOST_CSD
     SURFACE_CLEAR_PTR(seat->pointer.wl.surface_window_csd_margin);
     SURFACE_CLEAR_PTR(seat->tablet.wl.surface_window_csd_margin);

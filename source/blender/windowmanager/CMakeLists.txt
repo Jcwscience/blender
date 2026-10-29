@@ -49,6 +49,9 @@ set(SRC
   intern/wm_subwindow.cc
   intern/wm_surface.cc
   intern/wm_toolsystem.cc
+  intern/wm_touch.cc
+  intern/wm_touch_gestures.hh
+  wm_touch.hh
   intern/wm_tooltip.cc
   intern/wm_uilist_type.cc
   intern/wm_utils.cc
@@ -218,6 +221,7 @@ if(WITH_GTESTS)
   )
   set(TEST_SRC
     intern/wm_dragdrop_test.cc
+    intern/wm_touch_gestures_test.cc
   )
   blender_add_test_suite_lib(windowmanager "${TEST_SRC}" "${INC};${TEST_INC}" "${INC_SYS}" "${LIB}")
 endif()

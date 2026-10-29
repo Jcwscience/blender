@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <memory>
 #include <optional>
 
 #include "BKE_report.hh"
@@ -33,6 +34,8 @@ struct wmPaintCursor;
 struct WindowDrawCB;
 
 enum eWM_JobType : uint8_t;
+
+struct wmTouchState;
 
 namespace bke {
 
@@ -158,6 +161,7 @@ enum class wmIMEOwnerType : int8_t {
 };
 
 struct WindowRuntime {
+  std::shared_ptr<wmTouchState> touch;
   /** All events #wmEvent (ghost level events were handled). */
   ListBaseT<wmEvent> event_queue = {nullptr, nullptr};
 

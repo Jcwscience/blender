@@ -55,6 +55,8 @@ class ItemDeclaration;
 
 namespace ed::space_node {
 
+bool touch_is_empty_canvas(const bContext *C, ARegion &region, const int xy[2]);
+
 void tree_update(const bContext *C);
 
 float grid_size_get();

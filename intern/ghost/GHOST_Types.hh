@@ -341,6 +341,8 @@ enum GHOST_TEventType {
    * \note #GHOST_GetEventData returns #GHOST_TEventTrackpadData.
    */
   GHOST_kEventTrackpad,
+  /** Native touchscreen contact, see #GHOST_TEventTouchData. */
+  GHOST_kEventTouch,
 
 #ifdef WITH_INPUT_NDOF
   /**
@@ -1446,4 +1448,12 @@ enum GHOST_NDOF_ButtonT {
   GHOST_NDOF_BUTTON_NP_F4 = 232,
 
   GHOST_NDOF_BUTTON_USER = 0x10000
+};
+
+/** Contact coordinates use the same client pixel space as cursor events. */
+enum class GHOST_TTouchPhase { Down, Motion, Up, Cancel };
+struct GHOST_TEventTouchData {
+  int32_t id;
+  int32_t x, y;
+  GHOST_TTouchPhase phase;
 };

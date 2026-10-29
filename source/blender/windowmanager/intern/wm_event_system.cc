@@ -85,6 +85,7 @@
 #include "wm_event_system.hh"
 #include "wm_event_types.hh"
 #include "wm_surface.hh"
+#include "wm_touch.hh"
 #include "wm_window.hh"
 #include "wm_window_private.hh"
 
@@ -225,6 +226,49 @@ wmEvent *WM_event_add_simulate(wmWindow *win, const wmEvent *event_to_add)
                                            false);
   }
   return event;
+}
+
+wmEvent *wm_touch_mouse_event_add(wmWindow *win,
+                                  wmEvent *after,
+                                  wmEventType type,
+                                  short value,
+                                  int x,
+                                  int y,
+                                  double time,
+                                  bool menu)
+{
+  wmEvent event = *win->runtime->eventstate;
+  event.type = type;
+  event.val = value;
+  event.flag = WM_EVENT_TOUCH;
+  if (menu) {
+    event.flag |= WM_EVENT_TOUCH_MENU;
+  }
+  event.custom = event.customdata_free = 0;
+  event.customdata = nullptr;
+  /* Touch is absolute input, independent of any previously used pen. */
+  event.tablet = {};
+  event.tablet.pressure = 1.0f;
+  event.tablet.is_motion_absolute = true;
+  win->runtime->eventstate->tablet = event.tablet;
+  event.prev_type = win->runtime->eventstate->type;
+  event.prev_val = win->runtime->eventstate->val;
+  copy_v2_v2_int(event.prev_xy, win->runtime->eventstate->xy);
+  event.xy[0] = x;
+  event.xy[1] = y;
+  copy_v2_v2_int(win->runtime->eventstate->xy, event.xy);
+  if (ISKEYBOARD_OR_BUTTON(type)) {
+    wm_event_state_update_and_click_set_ex(&event,
+                                           uint64_t(std::max(0.0, time) * 1000),
+                                           win->runtime->eventstate,
+                                           &win->runtime->eventstate_prev_press_time_ms,
+                                           ISKEYBOARD(type),
+                                           ISMOUSE_BUTTON(type) && !menu);
+  }
+  wmEvent *added = WM_event_add(win, &event);
+  BLI_remlink(&win->runtime->event_queue, added);
+  BLI_insertlinkafter(&win->runtime->event_queue, after, added);
+  return added;
 }
 
 static void wm_event_custom_free(wmEvent *event)
@@ -1289,7 +1333,12 @@ static void wm_operator_finished(bContext *C,
     SET,
     CLEAR,
   } hud_status = NOP;
-  const bool do_register = (repeat == false) && wm_operator_register_check(wm, op->type);
+  /* Touch Add keeps creation and placement in one transaction. The modal node
+   * transform pushes the final state; cancellation removes the preview. */
+  const bool touch_add = wm_touch_node_placement_active(CTX_wm_window(C)) &&
+                         StringRef(op->type->idname).startswith("NODE_OT_add");
+  const bool do_register = !touch_add && (repeat == false) &&
+                           wm_operator_register_check(wm, op->type);
 
   op->customdata = nullptr;
 
@@ -1300,7 +1349,7 @@ static void wm_operator_finished(bContext *C,
   /* We don't want to do undo pushes for operators that are being
    * called from operators that already do an undo push. Usually
    * this will happen for python operators that call C operators. */
-  if (wm->op_undo_depth == 0) {
+  if (wm->op_undo_depth == 0 && !touch_add) {
     if (op->type->flag & OPTYPE_UNDO) {
       ED_undo_push_op(C, op);
       if (repeat == 0) {
@@ -4367,6 +4416,12 @@ void wm_event_do_handlers(bContext *C)
 
       wm_region_mouse_co(C, event);
 
+      if (wm_touch_event_handle(C, &win, event)) {
+        BLI_remlink(&win.runtime->event_queue, event);
+        wm_event_free_last_handled(&win, event);
+        continue;
+      }
+
       /* First we do priority handlers, modal + some limited key-maps. */
       action |= wm_handlers_do(C, event, &win.runtime->modalhandlers);
 
@@ -6178,6 +6233,19 @@ void wm_event_add_ghostevent(wmWindowManager *wm,
         }
       }
 
+      break;
+    }
+    case GHOST_kEventTouch: {
+      const auto &contact = *static_cast<const GHOST_TEventTouchData *>(customdata);
+      event.type = EVT_TOUCH;
+      event.val = KM_NOTHING;
+      event.touch_id = contact.id;
+      event.touch_phase = int(contact.phase);
+      event.touch_time = double(event_time_ms) / 1000.0;
+      event.xy[0] = contact.x;
+      event.xy[1] = contact.y;
+      wm_cursor_position_from_ghost_screen_coords(win, &event.xy[0], &event.xy[1]);
+      WM_event_add(win, &event);
       break;
     }
     case GHOST_kEventTrackpad: {

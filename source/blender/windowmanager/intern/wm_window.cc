@@ -2126,6 +2126,7 @@ static bool ghost_event_proc(const GHOST_IEvent *ghost_event, GHOST_TUserDataPtr
 
       break;
     }
+    case GHOST_kEventTouch:
     case GHOST_kEventButtonDown:
     case GHOST_kEventButtonUp: {
       if (win->active == 0) {

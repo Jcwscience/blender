@@ -83,6 +83,7 @@
 #include "WM_api.hh"
 #include "WM_types.hh"
 #include "wm_event_system.hh"
+#include "wm_touch.hh"
 
 namespace blender::ui {
 
@@ -9482,7 +9483,10 @@ static void button_activate_state(bContext *C, Button *but, HandleButtonState st
       if (data->used_mouse && !data->autoopentimer) {
         int time;
 
-        if (but->block->auto_open == true) { /* test for toolbox */
+        if (wm_touch_menu_active(data->window)) {
+          time = 10; /* Touch submenu dwell: 200ms, independent of mouse preferences. */
+        }
+        else if (but->block->auto_open == true) { /* test for toolbox */
           time = 1;
         }
         else if (but->block->flag & BLOCK_LOOP && but->type == ButtonType::Pulldown) {
@@ -11634,6 +11638,35 @@ static int handle_menu_event(bContext *C,
 
   /* if there's an active modal button, don't check events or outside, except for search menu */
   but = region_find_active_but(region);
+
+  /* A held touchscreen contact navigates by hovering and chooses on release.
+   * Limit this to touch-opened Add menus; normal pointer menus keep their behavior. */
+  if ((event->flag & WM_EVENT_TOUCH_MENU) && event->type == LEFTMOUSE && event->val == KM_RELEASE)
+  {
+    if (inside && but && !(but->flag & (BUT_DISABLED | UI_HIDDEN))) {
+      if (ELEM(but->type, ButtonType::Block, ButtonType::Pulldown, ButtonType::Menu)) {
+        handle_button_activate_by_type(C, region, but);
+      }
+      else if (but->optype) {
+        if (StringRef(but->optype->idname).startswith("NODE_OT_add")) {
+          wm_touch_node_placement_begin(C);
+        }
+        else {
+          wm_touch_menu_end(C);
+        }
+        button_execute(C, region, but);
+        menu->menuretval = RETURN_OK;
+        return WM_UI_HANDLER_CONTINUE;
+      }
+      return WM_UI_HANDLER_BREAK;
+    }
+    if (!inside && !is_parent_inside) {
+      menu->menuretval = RETURN_CANCEL;
+      wm_touch_menu_end(C);
+      return WM_UI_HANDLER_CONTINUE;
+    }
+    return inside ? WM_UI_HANDLER_BREAK : WM_UI_HANDLER_CONTINUE;
+  }
 
 #ifdef USE_DRAG_POPUP
 
