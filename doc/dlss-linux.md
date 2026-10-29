@@ -31,3 +31,13 @@ The GitHub mirror may lack LFS objects. Use the official asset endpoint locally:
 git config lfs.url https://projects.blender.org/blender/blender.git/info/lfs
 git lfs pull
 ```
+
+## Compiler cache
+
+The build script uses sccache as the C and C++ compiler launcher. Install sccache
+before running it. On this machine, `~/.config/sccache/config` sets a persistent
+32 GiB disk cache at `/shared/linux/cache/sccache`. This is a maximum disk usage,
+not a RAM reservation. Existing build products occupy about 4.8 GiB, with about
+0.45 GiB of object files, so this provides ample capacity for a full build.
+Use `sccache --show-stats` to inspect cache use and hits. Linking, runtime CUDA
+kernel compilation, and other noncompiler build steps are not cached by sccache.
