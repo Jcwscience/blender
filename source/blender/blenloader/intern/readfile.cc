@@ -4249,6 +4249,15 @@ static BHead *read_userdef(BlendFileData *bfd, FileData *fd, BHead *bhead)
     return nullptr;
   }
 
+  /* This fork-specific preference has no upstream file-version boundary. Check
+   * the saved schema so older preferences get the default without resetting a
+   * custom value written by this branch. Newly added DNA fields otherwise load as zero. */
+  if (DNA_struct_member_offset_by_name_with_alias(
+          fd->filesdna.get(), "UserDef", "short", "touch_hold_time") == -1)
+  {
+    user->touch_hold_time = UserDef{}.touch_hold_time;
+  }
+
   /* User struct has separate do-version handling */
   user->versionfile = bfd->main->versionfile;
   user->subversionfile = bfd->main->subversionfile;

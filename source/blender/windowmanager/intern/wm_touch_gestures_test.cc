@@ -77,6 +77,42 @@ TEST(Touch, TapAndHoldAreExclusive)
   EXPECT_EQ(actions[0].type, ActionType::Release);
 }
 
+TEST(Touch, ConfiguredHoldDurationIsCapturedAtTouchDown)
+{
+  Recognizer r;
+  r.input(Phase::Down, 0, {100, 100}, 0, true, 1.250);
+  /* Subsequent events may carry a different preference; this hold keeps its deadline. */
+  r.input(Phase::Motion, 0, {101, 100}, 0.2, true, 0.200);
+  EXPECT_TRUE(r.tick(0.501).empty());
+  EXPECT_TRUE(r.tick(1.249).empty());
+  auto actions = r.tick(1.251);
+  ASSERT_EQ(actions.size(), 1);
+  EXPECT_EQ(actions[0].type, ActionType::Hold);
+  EXPECT_TRUE(r.tick(2).empty());
+  r.input(Phase::Up, 0, {101, 100}, 2.1);
+  r.input(Phase::Down, 1, {}, 3, true, 0.200);
+  EXPECT_TRUE(r.tick(3.199).empty());
+  actions = r.tick(3.201);
+  ASSERT_EQ(actions.size(), 1);
+  EXPECT_EQ(actions[0].type, ActionType::Hold);
+}
+
+TEST(Touch, LongHoldDurationDoesNotPreventOtherGestures)
+{
+  Recognizer r;
+  r.input(Phase::Down, 0, {}, 0, true, 5);
+  r.input(Phase::Motion, 0, {20, 0}, 0.1, true, 5);
+  EXPECT_TRUE(r.tick(6).empty());
+  r.cancel();
+  r.input(Phase::Down, 0, {}, 10, true, 5);
+  r.input(Phase::Down, 1, {100, 0}, 10.05, true, 5);
+  r.input(Phase::Up, 0, {}, 10.10, true, 5);
+  auto actions = r.input(Phase::Up, 1, {100, 0}, 10.15, true, 5);
+  ASSERT_EQ(actions.size(), 1);
+  EXPECT_EQ(actions[0].type, ActionType::RightClick);
+  EXPECT_TRUE(r.tick(16).empty());
+}
+
 TEST(Touch, HoldOnlyWhenAllowedAndMotionCancelsHold)
 {
   Recognizer r;

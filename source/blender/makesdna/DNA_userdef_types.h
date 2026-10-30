@@ -1006,6 +1006,10 @@ struct UserDef {
   short versions = 1;
   short dbl_click_time = 350;
 
+  /** Milliseconds before a touch hold opens the node Add menu. */
+  short touch_hold_time = 500;
+  char _pad_touch[6] = {};
+
   AssetAccess asset_access = AssetAccess::OnlineAndOffline;
 
   char _pad0 = {};

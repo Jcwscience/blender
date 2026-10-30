@@ -43,7 +43,7 @@ Distances are logical pixels, independent of the window's native pixel scale.
 
 | Behavior | Threshold |
 | --- | --- |
-| Hold to open Add | 500 ms |
+| Hold to open Add | Configurable, 500 ms default |
 | Movement slop | 12 logical pixels |
 | Two-finger tap arrival separation | At most 120 ms |
 | Two-finger tap total duration | At most 300 ms |
@@ -131,3 +131,30 @@ without scroll leaking into the underlying editor, embedded-list scrolling with
 three fingers, and node placement after lifting on a submenu category. Scrolling
 did not change the test controls' values or execute menu entries. Twenty
 sanitized recognizer/scroll tests and the full DLSS build passed.
+
+## Touch hold duration
+
+Set **Preferences > Input > Touchscreen > Node Add Hold Time (ms)** to choose how
+long to hold empty node canvas before Add opens. The default is 500 ms; the
+allowed range is 200–5000 ms. The minimum leaves time to recognize the existing
+two-finger tap. Changes apply to the next touch sequence and are saved with normal
+Blender preferences. Older preference files start at 500 ms and keep their other
+settings. Python: `bpy.context.preferences.inputs.touch_hold_time`.
+
+Preference defaults, range, UI registration, and isolated save/reload can be
+checked from the source directory with:
+
+```sh
+../build_linux_full/bin/blender --background --factory-startup \
+  --python-exit-code 1 --python tests/python/bl_touch_preferences.py
+```
+
+The recognizer tests also cover custom deadlines, the next-gesture behavior of
+preference changes, and movement/two-finger taps while a longer hold is configured.
+
+The configurable hold passed 22 sanitized recognizer/scroll tests, preference
+factory/range/dirty-state checks, isolated save/reload, and loading a preference
+file written before the new setting existed. Injected Wayland input measured
+1.25 s and 0.20 s menu delays for the corresponding configured durations, and the
+Touchscreen Preferences panel was visually checked. The full build and OptiX/DLSS
+verification passed.

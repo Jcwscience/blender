@@ -7122,6 +7122,15 @@ static void rna_def_userdef_input(BlenderRNA *brna)
       "Pan/zoom the camera view instead of leaving the camera view when orbiting");
 #  endif /* WITH_INPUT_NDOF */
 
+  prop = RNA_def_property(srna, "touch_hold_time", PROP_INT, PROP_NONE);
+  RNA_def_property_range(prop, 200, 5000);
+  RNA_def_property_ui_range(prop, 200, 2000, 50, -1);
+  RNA_def_property_ui_text(
+      prop,
+      "Node Add Hold Time (ms)",
+      "Time in milliseconds to hold empty node canvas before opening the Add menu");
+  RNA_def_property_update(prop, 0, "rna_userdef_update");
+
   prop = RNA_def_property(srna, "mouse_double_click_time", PROP_INT, PROP_NONE);
   RNA_def_property_int_sdna(prop, nullptr, "dbl_click_time");
   RNA_def_property_range(prop, 1, 1000);

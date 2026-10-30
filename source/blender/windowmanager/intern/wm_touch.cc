@@ -381,7 +381,8 @@ bool wm_touch_event_handle(bContext *C, wmWindow *win, const wmEvent *event)
              p.x,
              p.y,
              hold);
-  auto actions = s.gestures.input(phase, event->touch_id, p, time, hold);
+  const double hold_duration = std::clamp(int(U.touch_hold_time), 200, 5000) / 1000.0;
+  auto actions = s.gestures.input(phase, event->touch_id, p, time, hold, hold_duration);
   dispatch(C, win, s, event, actions, time);
   if (!s.node_canvas && !s.ui_scroll) {
     s.gestures.stop_inertia();

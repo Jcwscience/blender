@@ -2012,6 +2012,13 @@ class USERPREF_PT_input_touchpad(InputPanel, CenterAlignMixIn, Panel):
             row.prop(inputs, "touchpad_scroll_direction", text="Scroll Direction")
 
 
+class USERPREF_PT_input_touchscreen(InputPanel, CenterAlignMixIn, Panel):
+    bl_label = "Touchscreen"
+
+    def draw_centered(self, context, layout):
+        layout.prop(context.preferences.inputs, "touch_hold_time")
+
+
 class USERPREF_PT_input_tablet(InputPanel, CenterAlignMixIn, Panel):
     bl_label = "Tablet"
 
@@ -3189,6 +3196,7 @@ classes = (
     USERPREF_PT_input_mouse,
     USERPREF_PT_input_tablet,
     USERPREF_PT_input_touchpad,
+    USERPREF_PT_input_touchscreen,
     USERPREF_PT_input_ndof,
     USERPREF_PT_navigation_orbit,
     USERPREF_PT_navigation_zoom,

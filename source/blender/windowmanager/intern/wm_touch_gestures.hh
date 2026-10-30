@@ -66,6 +66,7 @@ class Recognizer {
   std::map<int, Contact> contacts_;
   std::deque<std::pair<double, Point>> history_;
   double start_time_ = 0, release_time_ = 0, tick_time_ = 0;
+  double hold_duration_ = 0.500;
   int primary_ = -1;
   Point origin_, center_, velocity_;
   double distance_ = 0;
@@ -131,7 +132,12 @@ class Recognizer {
     *this = {};
   }
 
-  std::vector<Action> input(Phase phase, int id, Point p, double time, bool allow_hold = false)
+  std::vector<Action> input(Phase phase,
+                            int id,
+                            Point p,
+                            double time,
+                            bool allow_hold = false,
+                            double hold_duration = 0.500)
   {
     std::vector<Action> out;
     if (phase == Phase::Cancel) {
@@ -152,6 +158,7 @@ class Recognizer {
         origin_ = p;
         primary_ = id;
         allow_hold_ = allow_hold;
+        hold_duration_ = hold_duration;
       }
       if (draining_) {
         tap_ = false;
@@ -246,7 +253,7 @@ class Recognizer {
   std::vector<Action> tick(double time)
   {
     if (contacts_.size() == 1 && !multi_ && !drag_ && !held_ && !draining_ && allow_hold_ &&
-        time - start_time_ >= 0.500)
+        time - start_time_ >= hold_duration_)
     {
       held_ = true;
       return {{ActionType::Hold, origin_, {}}};
