@@ -7,6 +7,7 @@
 #include <cmath>
 #include <deque>
 #include <map>
+#include <utility>
 #include <vector>
 
 namespace blender::wm::touch {
@@ -51,8 +52,47 @@ class Recognizer {
   Point origin_, center_, velocity_;
   double distance_ = 0;
   bool drag_ = false, held_ = false, multi_ = false, draining_ = false;
-  bool tap_ = false, navigated_ = false, allow_hold_ = false;
+  bool tap_ = false, moved_ = false, navigated_ = false, allow_hold_ = false;
   bool inertia_ = false;
+
+  /* Twice the RMS radius equals the original pair distance for two contacts,
+   * and gives three contacts the same scale-independent pinch mechanics. */
+  std::pair<Point, double> geometry() const
+  {
+    Point center;
+    for (const auto &[id, contact] : contacts_) {
+      center = center + contact.position;
+    }
+    center = center * (1.0 / contacts_.size());
+    double radius_squared = 0;
+    for (const auto &[id, contact] : contacts_) {
+      const Point offset = contact.position - center;
+      radius_squared += offset.x * offset.x + offset.y * offset.y;
+    }
+    return {center, 2 * std::sqrt(radius_squared / contacts_.size())};
+  }
+
+  void record_center(double time)
+  {
+    history_.push_back({time, center_});
+    while (history_.size() > 2 && history_[1].first < time - 0.100) {
+      history_.pop_front();
+    }
+  }
+
+  void rebase_geometry(double time)
+  {
+    const auto [center, distance] = geometry();
+    /* Adding/removing a finger must neither move the view nor create velocity.
+     * Translate the samples together to retain genuine motion for inertia. */
+    const Point shift = center - center_;
+    for (auto &sample : history_) {
+      sample.second = sample.second + shift;
+    }
+    center_ = center;
+    distance_ = distance;
+    record_center(time);
+  }
 
  public:
   bool empty() const
@@ -99,15 +139,12 @@ class Recognizer {
         tap_ = false;
       }
       contacts_[id] = {p, p};
-      if (contacts_.size() == 2 && !drag_ && !held_ && !draining_) {
+      if ((contacts_.size() == 2 || contacts_.size() == 3) && !drag_ && !held_ && !draining_) {
         multi_ = true;
-        tap_ = time - start_time_ <= 0.120;
-        auto a = contacts_.begin(), b = std::next(a);
-        center_ = (a->second.position + b->second.position) * 0.5;
-        distance_ = (a->second.position - b->second.position).length();
-        history_.push_back({time, center_});
+        tap_ = contacts_.size() == 2 && time - start_time_ <= 0.120;
+        rebase_geometry(time);
       }
-      if (contacts_.size() > 2) {
+      if (contacts_.size() > 3) {
         draining_ = true;
         tap_ = false;
         velocity_ = {};
@@ -121,25 +158,24 @@ class Recognizer {
     found->second.position = p;
     if ((p - found->second.start).length() > 12) {
       tap_ = false;
+      moved_ = true;
     }
     if (phase == Phase::Motion && !draining_) {
-      if (multi_ && contacts_.size() == 2) {
-        auto a = contacts_.begin(), b = std::next(a);
-        Point center = (a->second.position + b->second.position) * 0.5;
-        double distance = (a->second.position - b->second.position).length();
-        if (!tap_ || navigated_) {
-          out.push_back({ActionType::Navigate,
-                         center,
-                         center_,
-                         distance_ > 1 && distance > 1 ? distance / distance_ : 1});
+      if (multi_ && (contacts_.size() == 2 || contacts_.size() == 3)) {
+        const Point previous_center = center_;
+        const double previous_distance = distance_;
+        const auto [center, distance] = geometry();
+        if (moved_ || navigated_) {
+          out.push_back(
+              {ActionType::Navigate,
+               center,
+               previous_center,
+               previous_distance > 1 && distance > 1 ? distance / previous_distance : 1});
           navigated_ = true;
         }
         center_ = center;
         distance_ = distance;
-        history_.push_back({time, center});
-        while (history_.size() > 2 && history_[1].first < time - 0.100) {
-          history_.pop_front();
-        }
+        record_center(time);
       }
       else if (!multi_ && id == primary_) {
         if (!held_ && !drag_ && (p - origin_).length() > 12) {
@@ -153,7 +189,7 @@ class Recognizer {
       }
     }
     if (phase == Phase::Up) {
-      if (multi_ && !draining_) {
+      if (multi_ && !draining_ && contacts_.size() == 2) {
         draining_ = true;
         release_time_ = time;
         tick_time_ = time;
@@ -173,6 +209,10 @@ class Recognizer {
         out.push_back({ActionType::Release, p, {}});
       }
       contacts_.erase(found);
+      if (multi_ && !draining_ && contacts_.size() == 2) {
+        tap_ = false;
+        rebase_geometry(time);
+      }
       if (contacts_.empty()) {
         if (multi_ && tap_ && time - start_time_ <= 0.300) {
           out.push_back({ActionType::RightClick, center_, {}});

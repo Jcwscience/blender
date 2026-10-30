@@ -7,7 +7,7 @@ this patch.
 
 ## Gestures
 
-- Drag with two fingers to pan. Spread or pinch to zoom around their centroid.
+- Drag with two or three fingers to pan. Spread or pinch to zoom around their centroid.
   Pan and zoom can be combined. Rotation and zoom inertia are disabled.
 - Lift after a pan to coast. A new touch, mouse press, popup, or editor change
   stops the motion.
@@ -15,7 +15,7 @@ this patch.
 - Hold one finger on empty canvas to open Add. Keep touching and slide over
   categories to open submenus, then release over a node entry to select it.
 - The selected node remains a preview. Tap the canvas to place its upper-left
-  corner at that point. Two-finger pan/pinch remains available before placement.
+  corner at that point. Two- or three-finger pan/pinch remains available before placement.
 - Two-finger tap or Escape cancels pending placement and removes the new node.
 - Releasing outside the Add menu cancels it. Releasing over a category keeps its
   submenu open for another touch selection. Existing menu edge scrolling applies.
@@ -23,8 +23,11 @@ this patch.
 Single-finger selection, node dragging, socket linking, and controls remain
 available. Holding on nodes, frames, links, sockets, or scrollbars does not open
 Add. Once a single-finger drag starts, additional contacts cannot turn it into a
-canvas gesture. After a multi-contact gesture starts releasing, all contacts must
-lift before a new gesture begins.
+canvas gesture. Adding a third finger or lifting from three fingers to two
+rebases the gesture without a canvas jump and preserves pan inertia. Once fewer
+than two contacts remain, all contacts must lift before a new gesture begins.
+Three-finger taps do not open menus or cancel placement. Four or more contacts
+suppress navigation until all fingers lift.
 
 ## Thresholds
 
@@ -72,7 +75,7 @@ checks software delivery but cannot validate a device's firmware or ergonomics.
 
 ## Verification on this branch
 
-The full Linux DLSS build passed. Ten deterministic recognizer tests passed with
+The full Linux DLSS build passed. Sixteen deterministic recognizer tests passed with
 AddressSanitizer and UndefinedBehaviorSanitizer enabled. An isolated KWin virtual
 Wayland desktop delivered native touch events through the compositor and GHOST.
 Those checks covered hold/slide/placement in Shader, Geometry, and Compositor
@@ -81,3 +84,20 @@ menus, pending-preview cancellation, fixed preview position during pan/pinch, an
 inertial panning. A 2x output verified logical movement thresholds and ordinary
 single-finger node dragging. The final DLSS capability check and OptiX render also
 passed. Physical touchscreen and pen hardware acceptance remains outstanding.
+
+## Three-finger support
+
+The two- and three-contact paths share centroid panning and RMS-spread pinch
+scaling. For two contacts the spread equals the original pair distance, so the
+zoom response is unchanged. Changing contact count rebases the geometry and
+velocity samples; it does not emit navigation. Stationary contact-count changes
+cannot create momentum. Two-finger tap remains the only context-click gesture.
+
+Use `touch-support` for this combined DLSS and touchscreen build. See
+[local-feature-branches.md](local-feature-branches.md) for the separate DLSS branch,
+future touch feature branches, upstream updates, and tested snapshot tags.
+
+The three-finger update additionally passed compositor-injected pan, pinch,
+inertia, inertia interruption, and two-to-three / three-to-two contact transitions.
+Physical touchscreen testing remains outstanding. The support branches preserve
+published history and the upstream Blender version number.

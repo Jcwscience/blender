@@ -115,16 +115,126 @@ TEST(Touch, NoInertiaAfterPausingBeforeRelease)
   EXPECT_FALSE(r.inertial());
 }
 
-TEST(Touch, ThirdContactAndReplacementSuppressTap)
+TEST(Touch, ThreeFingerPanUsesAllContacts)
+{
+  Recognizer r;
+  r.input(Phase::Down, 9, {0, 0}, 0);
+  r.input(Phase::Down, 2, {100, 0}, 0.01);
+  EXPECT_TRUE(r.input(Phase::Down, 7, {50, 90}, 0.02).empty());
+  auto actions = r.input(Phase::Motion, 7, {80, 120}, 0.03);
+  ASSERT_EQ(actions.size(), 1);
+  EXPECT_EQ(actions[0].type, ActionType::Navigate);
+  EXPECT_DOUBLE_EQ(actions[0].previous.x, 50);
+  EXPECT_DOUBLE_EQ(actions[0].previous.y, 30);
+  EXPECT_DOUBLE_EQ(actions[0].position.x, 60);
+  EXPECT_DOUBLE_EQ(actions[0].position.y, 40);
+}
+
+TEST(Touch, ThreeFingerPinchUsesSpreadAndNeverRightClicks)
+{
+  Recognizer r;
+  r.input(Phase::Down, 0, {-100, 0}, 0);
+  r.input(Phase::Down, 1, {0, 0}, 0.01);
+  r.input(Phase::Down, 2, {100, 0}, 0.02);
+  auto first = r.input(Phase::Motion, 0, {-200, 0}, 0.03);
+  auto second = r.input(Phase::Motion, 2, {200, 0}, 0.04);
+  ASSERT_EQ(first.size(), 1);
+  ASSERT_EQ(second.size(), 1);
+  EXPECT_NEAR(first[0].zoom * second[0].zoom, 2, 1e-12);
+  EXPECT_DOUBLE_EQ(second[0].position.x, 0);
+  EXPECT_TRUE(r.input(Phase::Up, 0, {-200, 0}, 0.05).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 1, {}, 0.05).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 2, {200, 0}, 0.05).empty());
+}
+
+TEST(Touch, ThreeFingerTapAndMotionWithinSlopDoNothing)
+{
+  Recognizer r;
+  r.input(Phase::Down, 0, {}, 0, true);
+  r.input(Phase::Down, 1, {100, 0}, 0.01);
+  r.input(Phase::Down, 2, {50, 100}, 0.02);
+  EXPECT_TRUE(r.input(Phase::Motion, 2, {55, 100}, 0.03).empty());
+  EXPECT_TRUE(r.tick(0.6).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 2, {55, 100}, 0.61).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 0, {}, 0.62).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 1, {100, 0}, 0.63).empty());
+  EXPECT_FALSE(r.inertial());
+  r.input(Phase::Down, 0, {}, 1);
+  r.input(Phase::Down, 1, {100, 0}, 1.01);
+  r.input(Phase::Down, 2, {50, 100}, 1.02);
+  r.input(Phase::Up, 2, {50, 100}, 1.03);
+  r.input(Phase::Up, 0, {}, 1.04);
+  EXPECT_TRUE(r.input(Phase::Up, 1, {100, 0}, 1.05).empty());
+}
+
+TEST(Touch, ContactCountChangesRebaseWithoutMovingOrZooming)
+{
+  Recognizer r;
+  r.input(Phase::Down, 0, {}, 0);
+  r.input(Phase::Down, 1, {100, 0}, 0.01);
+  r.input(Phase::Motion, 0, {20, 0}, 0.02);
+  r.input(Phase::Motion, 1, {120, 0}, 0.03);
+  EXPECT_TRUE(r.input(Phase::Down, 2, {1000, 0}, 0.04).empty());
+  auto same = r.input(Phase::Motion, 2, {1000, 0}, 0.05);
+  ASSERT_EQ(same.size(), 1);
+  EXPECT_DOUBLE_EQ(same[0].position.x, same[0].previous.x);
+  EXPECT_DOUBLE_EQ(same[0].zoom, 1);
+  EXPECT_TRUE(r.input(Phase::Up, 2, {1000, 0}, 0.06).empty());
+  same = r.input(Phase::Motion, 1, {120, 0}, 0.07);
+  ASSERT_EQ(same.size(), 1);
+  EXPECT_DOUBLE_EQ(same[0].position.x, same[0].previous.x);
+  EXPECT_DOUBLE_EQ(same[0].zoom, 1);
+  auto move = r.input(Phase::Motion, 0, {40, 0}, 0.08);
+  ASSERT_EQ(move.size(), 1);
+  EXPECT_DOUBLE_EQ(move[0].position.x - move[0].previous.x, 10);
+}
+
+TEST(Touch, ThreeFingerPanRetainsInertiaOnSimultaneousRelease)
+{
+  Recognizer r;
+  r.input(Phase::Down, 0, {}, 0);
+  r.input(Phase::Down, 1, {100, 0}, 0.01);
+  r.input(Phase::Down, 2, {50, 100}, 0.02);
+  r.input(Phase::Motion, 0, {30, 0}, 0.03);
+  r.input(Phase::Motion, 1, {130, 0}, 0.03);
+  r.input(Phase::Motion, 2, {80, 100}, 0.03);
+  r.input(Phase::Up, 2, {80, 100}, 0.04);
+  r.input(Phase::Up, 0, {30, 0}, 0.04);
+  r.input(Phase::Up, 1, {130, 0}, 0.04);
+  ASSERT_TRUE(r.inertial());
+  auto actions = r.tick(0.05);
+  ASSERT_EQ(actions.size(), 1);
+  EXPECT_GT(actions[0].position.x, actions[0].previous.x);
+  r.input(Phase::Down, 4, {}, 0.06);
+  EXPECT_FALSE(r.inertial());
+}
+
+TEST(Touch, StationaryContactChangesDoNotCreateInertia)
+{
+  Recognizer r;
+  r.input(Phase::Down, 0, {}, 0);
+  r.input(Phase::Down, 1, {100, 0}, 0.01);
+  r.input(Phase::Down, 2, {10000, 10000}, 0.02);
+  r.input(Phase::Up, 2, {10000, 10000}, 0.03);
+  r.input(Phase::Up, 0, {}, 0.04);
+  r.input(Phase::Up, 1, {100, 0}, 0.04);
+  EXPECT_FALSE(r.inertial());
+  EXPECT_TRUE(r.tick(0.05).empty());
+}
+
+TEST(Touch, FourthContactAndReplacementSuppressNavigationAndTap)
 {
   Recognizer r;
   r.input(Phase::Down, 0, {}, 0);
   r.input(Phase::Down, 1, {100, 0}, 0.01);
   r.input(Phase::Down, 2, {200, 0}, 0.02);
-  EXPECT_TRUE(r.input(Phase::Motion, 0, {20, 0}, 0.03).empty());
-  EXPECT_TRUE(r.input(Phase::Up, 0, {}, 0.04).empty());
-  EXPECT_TRUE(r.input(Phase::Up, 1, {}, 0.05).empty());
-  EXPECT_TRUE(r.input(Phase::Up, 2, {}, 0.06).empty());
+  r.input(Phase::Down, 3, {300, 0}, 0.03);
+  EXPECT_TRUE(r.input(Phase::Motion, 0, {20, 0}, 0.04).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 3, {}, 0.05).empty());
+  EXPECT_TRUE(r.input(Phase::Motion, 0, {40, 0}, 0.06).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 0, {}, 0.07).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 1, {}, 0.08).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 2, {}, 0.09).empty());
   EXPECT_FALSE(r.inertial());
   r.input(Phase::Down, 0, {}, 1);
   r.input(Phase::Down, 1, {100, 0}, 1.01);
