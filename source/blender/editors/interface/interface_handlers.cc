@@ -10581,7 +10581,8 @@ static int handle_button_event(bContext *C, const wmEvent *event, Button *but)
           WM_event_timer_remove(data->wm, data->window, data->autoopentimer);
           data->autoopentimer = nullptr;
           /* Do not open sub-menus while using an auto-scroll handler. */
-          if ((block_is_pie_menu(block) || !block->handle || !block->handle->scrolltimer) &&
+          if (!wm_touch_ui_scrolling(data->window) &&
+              (block_is_pie_menu(block) || !block->handle || !block->handle->scrolltimer) &&
               (button_contains_point_px(but, region, event->xy) || but->active))
           {
             button_activate_state(C, but, BUTTON_STATE_MENU_OPEN);
@@ -11643,6 +11644,9 @@ static int handle_menu_event(bContext *C,
    * Limit this to touch-opened Add menus; normal pointer menus keep their behavior. */
   if ((event->flag & WM_EVENT_TOUCH_MENU) && event->type == LEFTMOUSE && event->val == KM_RELEASE)
   {
+    /* A fresh touch can release before hover/safe-triangle timers update the
+     * active item. Select the release target, not a stale highlighted button. */
+    but = but_find_mouse_over(region, event);
     if (inside && but && !(but->flag & (BUT_DISABLED | UI_HIDDEN))) {
       if (ELEM(but->type, ButtonType::Block, ButtonType::Pulldown, ButtonType::Menu)) {
         handle_button_activate_by_type(C, region, but);
@@ -11837,6 +11841,9 @@ static int handle_menu_event(bContext *C,
             const float dy = event->xy[1] - event->prev_xy[1];
             if (dy != 0.0f) {
               menu_scroll_apply_offset_y(region, block, dy);
+              if (event->flag & WM_EVENT_TOUCH) {
+                CLOG_DEBUG(&LOG, "Touch popup scroll offset=%g", block->handle->scrolloffset);
+              }
 
               if (but) {
                 but->active->cancel = true;
@@ -11846,7 +11853,8 @@ static int handle_menu_event(bContext *C,
             }
             break;
           }
-          else if (!block_is_menu(block)) {
+          else if ((event->flag & WM_EVENT_TOUCH) || !block_is_menu(block)) {
+            /* Touch swipes scroll content; they never arrow through menu entries. */
             break;
           }
           ATTR_FALLTHROUGH;

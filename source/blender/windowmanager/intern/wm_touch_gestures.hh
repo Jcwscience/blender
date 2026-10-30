@@ -41,6 +41,24 @@ struct Action {
   double zoom = 1;
 };
 
+/* Preserve fractional framebuffer pixels across slow inertial scroll ticks. */
+class ScrollAccumulator {
+  Point remainder_;
+
+ public:
+  std::pair<int, int> consume(Point delta, double scale)
+  {
+    remainder_ = remainder_ + delta * scale;
+    const int x = std::lround(remainder_.x), y = std::lround(remainder_.y);
+    remainder_ = remainder_ - Point{double(x), double(y)};
+    return {x, y};
+  }
+  void reset()
+  {
+    remainder_ = {};
+  }
+};
+
 class Recognizer {
   struct Contact {
     Point start, position;

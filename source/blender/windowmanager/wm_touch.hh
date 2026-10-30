@@ -14,6 +14,7 @@ bool wm_touch_event_handle(bContext *C, wmWindow *win, const wmEvent *event);
 void wm_touch_node_placement_begin(bContext *C);
 bool wm_touch_node_placement_active(const wmWindow *win);
 bool wm_touch_menu_active(const wmWindow *win);
+bool wm_touch_ui_scrolling(const wmWindow *win);
 void wm_touch_menu_end(bContext *C);
 wmEvent *wm_touch_mouse_event_add(wmWindow *win,
                                   wmEvent *after,

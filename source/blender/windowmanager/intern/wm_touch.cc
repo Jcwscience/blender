@@ -17,6 +17,7 @@
 #include "DNA_screen_types.h"
 #include "DNA_space_types.h"
 #include "DNA_userdef_types.h"
+#include "DNA_view2d_types.h"
 #include "ED_node.hh"
 #include "ED_screen.hh"
 #include "UI_interface_c.hh"
@@ -38,7 +39,14 @@ struct wmTouchState {
   ScrArea *area = nullptr;
   ARegion *region = nullptr;
   wmTimer *timer = nullptr;
-  int primary = -1;
+  int area_type = SPACE_EMPTY;
+  ScrArea *node_area = nullptr;
+  ARegion *node_region = nullptr;
+  bool popup = false;
+  bool ui_scroll = false;
+  bool scrolling = false;
+  Point scroll_anchor;
+  wm::touch::ScrollAccumulator scroll_accumulator;
   std::map<int, Point> contacts;
   bool node_canvas = false;
   bool menu = false;
@@ -57,6 +65,10 @@ bool wm_touch_menu_active(const wmWindow *win)
 {
   return win && win->runtime->touch && win->runtime->touch->menu;
 }
+bool wm_touch_ui_scrolling(const wmWindow *win)
+{
+  return win && win->runtime->touch && win->runtime->touch->scrolling;
+}
 void wm_touch_menu_end(bContext *C)
 {
   wmWindow *win = CTX_wm_window(C);
@@ -71,16 +83,31 @@ static bool target_valid(wmWindow *win, const wmTouchState &s)
   if (screen != s.screen || !screen) {
     return false;
   }
-  for (ScrArea &area : screen->areabase) {
-    if (&area == s.area && area.spacetype == SPACE_NODE) {
-      for (ARegion &region : area.regionbase) {
-        if (&region == s.region) {
-          return true;
-        }
+  if (s.popup) {
+    for (ARegion &region : screen->regionbase) {
+      if (&region == s.region) {
+        return true;
       }
     }
+    return false;
   }
-  return false;
+  if (!s.area) {
+    return s.region == nullptr;
+  }
+  auto area_valid = [&](const auto &areas) {
+    for (const ScrArea &area : areas) {
+      if (&area == s.area && area.spacetype == s.area_type) {
+        for (const ARegion &region : area.regionbase) {
+          if (&region == s.region) {
+            return true;
+          }
+        }
+        return s.region == nullptr;
+      }
+    }
+    return false;
+  };
+  return area_valid(screen->areabase) || area_valid(win->global_areas.areabase);
 }
 
 static void navigate(wmTouchState &s, const Action &action)
@@ -127,6 +154,23 @@ static wmEvent *emit(wmWindow *win,
                                   s.menu);
 }
 
+static wmEvent *scroll(
+    wmWindow *win, wmTouchState &s, wmEvent *after, const Action &action, double time)
+{
+  s.scrolling = true;
+  const auto [dx, dy] = s.scroll_accumulator.consume(action.position - action.previous, s.scale);
+  if (dx == 0 && dy == 0) {
+    return after;
+  }
+  /* Keep the event over the captured widget even when coasting would move the
+   * virtual centroid outside it. Native UI handlers supply bounds and list rules. */
+  wmEvent *pan = emit(win, s, after, MOUSEPAN, KM_NOTHING, s.scroll_anchor, time);
+  pan->prev_xy[0] = pan->xy[0] - dx;
+  pan->prev_xy[1] = pan->xy[1] - dy;
+  pan->modifier = wmEventModifierFlag(0);
+  return pan;
+}
+
 static void dispatch(bContext *C,
                      wmWindow *win,
                      wmTouchState &s,
@@ -169,6 +213,8 @@ static void dispatch(bContext *C,
       case ActionType::Hold: {
         CLOG_DEBUG(&LOG, "opening touch Add menu");
         s.hold = action.position;
+        s.node_area = s.area;
+        s.node_region = s.region;
         s.menu = true;
         s.gestures.stop_inertia();
         const int x = std::lround(s.hold.x * s.scale), y = std::lround(s.hold.y * s.scale);
@@ -181,7 +227,15 @@ static void dispatch(bContext *C,
         break;
       }
       case ActionType::Navigate:
-        navigate(s, action);
+        if (s.node_canvas) {
+          navigate(s, action);
+        }
+        else if (s.ui_scroll) {
+          after = scroll(win, s, after, action, time);
+        }
+        else {
+          s.gestures.stop_inertia();
+        }
         break;
       case ActionType::Cancel:
         after = emit(win, s, after, EVT_ESCKEY, KM_PRESS, action.position, time);
@@ -189,7 +243,7 @@ static void dispatch(bContext *C,
           after = emit(win, s, after, LEFTMOUSE, KM_RELEASE, action.position, time);
           s.pointer_down = false;
         }
-        s.menu = s.placement = false;
+        s.menu = s.placement = s.scrolling = false;
         break;
     }
   }
@@ -204,6 +258,11 @@ void wm_touch_node_placement_begin(bContext *C)
   wmTouchState &s = *win->runtime->touch;
   s.menu = false;
   s.placement = true;
+  s.area = s.node_area;
+  s.region = s.node_region;
+  s.area_type = SPACE_NODE;
+  s.node_canvas = true;
+  s.popup = s.ui_scroll = s.scrolling = false;
   /* The add operator uses this position as its invocation origin. */
   win->runtime->eventstate->xy[0] = std::lround(s.hold.x * s.scale);
   win->runtime->eventstate->xy[1] = std::lround(s.hold.y * s.scale);
@@ -229,7 +288,9 @@ bool wm_touch_event_handle(bContext *C, wmWindow *win, const wmEvent *event)
   wmWindowManager *wm = CTX_wm_manager(C);
   const bool timer = s.timer && event->type == TIMER && event->customdata == s.timer;
   const bool native = event->type == EVT_TOUCH;
-  const bool invalid = (s.node_canvas || timer) && !target_valid(win, s);
+  const bool touch_pan = event->type == MOUSEPAN && (event->flag & WM_EVENT_TOUCH);
+  const bool captured = !s.gestures.empty() || s.gestures.inertial() || s.menu || s.placement;
+  const bool invalid = (captured || timer || touch_pan) && !target_valid(win, s);
   if (invalid || event->type == WINDEACTIVATE) {
     std::vector<Action> cancel = s.gestures.input(Phase::Cancel, 0, {}, 0);
     if (s.placement || s.menu) {
@@ -237,24 +298,27 @@ bool wm_touch_event_handle(bContext *C, wmWindow *win, const wmEvent *event)
     }
     dispatch(C, win, s, event, cancel, 0);
     s.contacts.clear();
-    s.node_canvas = s.menu = s.placement = false;
+    s.node_canvas = s.menu = s.placement = s.scrolling = false;
     if (s.timer) {
       WM_event_timer_remove(wm, win, s.timer);
       s.timer = nullptr;
     }
-    return native || timer;
+    return native || timer || touch_pan;
   }
   if (!native && !timer) {
-    if (!(event->flag & WM_EVENT_TOUCH) &&
-        ((ISMOUSE_BUTTON(event->type) && event->val == KM_PRESS) || event->type == EVT_ESCKEY))
+    if (!(event->flag & WM_EVENT_TOUCH) && event->val == KM_PRESS &&
+        (ISMOUSE_BUTTON(event->type) || ISKEYBOARD(event->type)))
     {
       s.gestures.stop_inertia();
-      s.menu = s.placement = false;
+      s.scrolling = false;
+      if (ISMOUSE_BUTTON(event->type) || event->type == EVT_ESCKEY) {
+        s.menu = s.placement = false;
+      }
     }
     return false;
   }
   if (timer) {
-    if (!s.menu && ui::popup_block_exists(s.screen)) {
+    if (!s.popup && !s.menu && ui::popup_block_exists(s.screen)) {
       s.gestures.stop_inertia();
     }
     dispatch(C,
@@ -266,6 +330,7 @@ bool wm_touch_event_handle(bContext *C, wmWindow *win, const wmEvent *event)
     if (s.gestures.empty() && !s.gestures.inertial()) {
       WM_event_timer_remove(wm, win, s.timer);
       s.timer = nullptr;
+      s.scrolling = false;
     }
     return true;
   }
@@ -274,59 +339,58 @@ bool wm_touch_event_handle(bContext *C, wmWindow *win, const wmEvent *event)
   s.clock_offset = BLI_time_now_seconds() - time;
   if (phase == Phase::Down && s.contacts.empty()) {
     s.gestures.stop_inertia();
-    if (!s.menu && !s.placement) {
+    s.scrolling = false;
+    s.scroll_accumulator.reset();
+    if (s.menu && !ui::popup_block_exists(WM_window_get_active_screen(win))) {
+      s.menu = false;
+    }
+    if (!s.placement) {
       s.area = CTX_wm_area(C);
       s.region = CTX_wm_region(C);
       s.screen = WM_window_get_active_screen(win);
-      s.node_canvas = s.area && s.area->spacetype == SPACE_NODE && s.region &&
+      s.area_type = s.area ? s.area->spacetype : SPACE_EMPTY;
+      ARegion *popup = ui::popup_region_find_xy(s.screen, event->xy);
+      s.popup = popup != nullptr;
+      if (popup) {
+        s.region = popup;
+      }
+      s.node_canvas = !s.popup && s.area && s.area->spacetype == SPACE_NODE && s.region &&
                       s.region->regiontype == RGN_TYPE_WINDOW && !ui::popup_block_exists(s.screen);
-    }
-    if (!s.node_canvas && s.timer) {
-      WM_event_timer_remove(wm, win, s.timer);
-      s.timer = nullptr;
+      s.ui_scroll = !s.node_canvas && s.region &&
+                    (s.popup ||
+                     (s.region->v2d.scroll & (V2D_SCROLL_VERTICAL | V2D_SCROLL_HORIZONTAL)) ||
+                     ELEM(s.region->regiontype, RGN_TYPE_UI, RGN_TYPE_TOOLS));
     }
     auto *ghost = static_cast<GHOST_IWindow *>(win->runtime->ghostwin);
     /* Wayland already scales GHOST coordinates into framebuffer pixels. Its
      * native-pixel multiplier remains 1; the DPI hint carries the surface scale. */
     s.scale = ghost ? std::max(0.1, double(ghost->getDPIHint()) / 96.0) : 1.0;
-    s.primary = event->touch_id;
+    s.scroll_anchor = {event->xy[0] / s.scale, event->xy[1] / s.scale};
   }
   Point p{event->xy[0] / s.scale, event->xy[1] / s.scale};
   if (phase == Phase::Down) {
     s.contacts[event->touch_id] = p;
   }
   CLOG_DEBUG(&LOG, "node_canvas=%d menu=%d placement=%d", s.node_canvas, s.menu, s.placement);
-  if (!s.node_canvas) {
-    /* Preserve the legacy single-contact pointer outside node canvases. */
-    if (event->touch_id == s.primary || phase == Phase::Cancel) {
-      std::vector<Action> actions;
-      if (phase != Phase::Cancel) {
-        actions.push_back({ActionType::Move, p, {}});
-      }
-      if (phase == Phase::Down) {
-        actions.push_back({ActionType::Press, p, {}});
-      }
-      if (phase == Phase::Up || (phase == Phase::Cancel && s.pointer_down)) {
-        actions.push_back({ActionType::Release, p, {}});
-      }
-      dispatch(C, win, s, event, actions, time);
-    }
+  const bool hold = s.node_canvas && phase == Phase::Down && !s.menu && !s.placement &&
+                    ed::space_node::touch_is_empty_canvas(C, *s.region, event->xy);
+  CLOG_DEBUG(&LOG,
+             "contact phase=%d id=%d xy=%g,%g hold=%d",
+             int(phase),
+             event->touch_id,
+             p.x,
+             p.y,
+             hold);
+  auto actions = s.gestures.input(phase, event->touch_id, p, time, hold);
+  dispatch(C, win, s, event, actions, time);
+  if (!s.node_canvas && !s.ui_scroll) {
+    s.gestures.stop_inertia();
   }
-  else {
-    bool hold = phase == Phase::Down && !s.menu && !s.placement &&
-                ed::space_node::touch_is_empty_canvas(C, *s.region, event->xy);
-    CLOG_DEBUG(&LOG,
-               "contact phase=%d id=%d xy=%g,%g hold=%d",
-               int(phase),
-               event->touch_id,
-               p.x,
-               p.y,
-               hold);
-    auto actions = s.gestures.input(phase, event->touch_id, p, time, hold);
-    dispatch(C, win, s, event, actions, time);
-    if (!s.timer && (!s.gestures.empty() || s.gestures.inertial())) {
-      s.timer = WM_event_timer_add(wm, win, TIMER, 1.0 / 60.0);
-    }
+  if (!s.timer && ((!s.gestures.empty() && s.node_canvas) || s.gestures.inertial())) {
+    s.timer = WM_event_timer_add(wm, win, TIMER, 1.0 / 60.0);
+  }
+  if (s.gestures.empty() && !s.gestures.inertial()) {
+    s.scrolling = false;
   }
   if (phase == Phase::Up) {
     s.contacts.erase(event->touch_id);

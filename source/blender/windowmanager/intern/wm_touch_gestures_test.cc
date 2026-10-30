@@ -6,6 +6,57 @@
 
 namespace blender::wm::touch::tests {
 
+TEST(Touch, ContextTapDefersAllLeftButtonActions)
+{
+  /* Used by buttons, panels, menus, and canvases: the first contact must not
+   * toggle a control before the second finger turns the sequence into RMB. */
+  Recognizer r;
+  EXPECT_TRUE(r.input(Phase::Down, 0, {100, 100}, 0, false).empty());
+  EXPECT_TRUE(r.input(Phase::Motion, 0, {103, 100}, 0.02).empty());
+  EXPECT_TRUE(r.input(Phase::Down, 1, {120, 100}, 0.04, false).empty());
+  EXPECT_TRUE(r.tick(0.1).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 0, {103, 100}, 0.15).empty());
+  const auto actions = r.input(Phase::Up, 1, {120, 100}, 0.18);
+  ASSERT_EQ(actions.size(), 1);
+  EXPECT_EQ(actions[0].type, ActionType::RightClick);
+}
+
+TEST(Touch, UIContactCancelCannotBecomeClick)
+{
+  Recognizer r;
+  r.input(Phase::Down, 0, {}, 0, false);
+  r.input(Phase::Down, 1, {100, 0}, 0.01, false);
+  EXPECT_TRUE(r.input(Phase::Cancel, 0, {}, 0.02).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 0, {}, 0.03).empty());
+  EXPECT_TRUE(r.input(Phase::Up, 1, {100, 0}, 0.03).empty());
+  EXPECT_FALSE(r.inertial());
+}
+
+TEST(Touch, SlowScrollAccumulatesFractionalPixelsAtNativeScale)
+{
+  ScrollAccumulator scroll;
+  int total = 0;
+  for (int i = 0; i < 100; i++) {
+    auto [x, y] = scroll.consume({0, 0.1}, 2);
+    EXPECT_EQ(x, 0);
+    total += y;
+  }
+  EXPECT_EQ(total, 20);
+  for (int i = 0; i < 100; i++) {
+    total += scroll.consume({0, -0.1}, 2).second;
+  }
+  EXPECT_EQ(total, 0);
+}
+
+TEST(Touch, NewScrollTargetDoesNotInheritFractionalMovement)
+{
+  ScrollAccumulator scroll;
+  EXPECT_EQ(scroll.consume({0, 0.4}, 1).second, 0);
+  scroll.reset();
+  EXPECT_EQ(scroll.consume({0, 0.4}, 1).second, 0);
+  EXPECT_EQ(scroll.consume({0, 0.4}, 1).second, 1);
+}
+
 TEST(Touch, TapAndHoldAreExclusive)
 {
   Recognizer r;

@@ -896,6 +896,19 @@ void popup_block_close(bContext *C, wmWindow *win, Block *block)
   ED_workspace_status_text(C, nullptr);
 }
 
+ARegion *popup_region_find_xy(const bScreen *screen, const int xy[2])
+{
+  for (ARegion *region = screen->regionbase.last(); region; region = region->prev) {
+    if (BLI_rcti_isect_pt_v(&region->winrct, xy) &&
+        (!region->runtime->uiblocks.is_empty() ||
+         (region->runtime->type && region->runtime->type->layout)))
+    {
+      return region;
+    }
+  }
+  return nullptr;
+}
+
 bool popup_block_exists(const bScreen *screen)
 {
   for (const ARegion &region : screen->regionbase) {

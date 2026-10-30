@@ -1,9 +1,10 @@
-# Wayland touchscreen node editing
+# Wayland touchscreen UI and node editing
 
 This patch adds native touchscreen contact events to the Wayland backend and
-recognizes gestures in node-editor canvas regions. Other editor regions retain
-single-contact mouse emulation. X11 and Windows touchscreen support is outside
-this patch.
+recognizes gestures throughout Blender's UI. Two-finger taps produce the native
+right-click action in editors, controls, and popups. Two- and three-finger drags
+scroll menus, lists, and panels with inertia; node canvases also support pinch
+zoom. X11 and Windows touchscreen support is outside this patch.
 
 ## Gestures
 
@@ -11,7 +12,14 @@ this patch.
   Pan and zoom can be combined. Rotation and zoom inertia are disabled.
 - Lift after a pan to coast. A new touch, mouse press, popup, or editor change
   stops the motion.
-- Tap with two fingers for a right-click at their centroid.
+- Tap with two fingers for a right-click at their centroid anywhere in the UI.
+  The first finger does not activate a button while waiting for the second.
+- Drag with two or three fingers over scrollable menus, lists, or panels to scroll.
+  Movement coasts after release using the same decay as canvas panning. UI pinch
+  changes do not zoom the controls. Scrolling stays anchored to its initial target
+  and respects the native scroll bounds; it does not select menu entries.
+- A new touch, mouse press, keyboard input, popup dismissal, or window deactivation
+  stops UI scrolling. Closing a popup cannot scroll the editor behind it.
 - Hold one finger on empty canvas to open Add. Keep touching and slide over
   categories to open submenus, then release over a node entry to select it.
 - The selected node remains a preview. Tap the canvas to place its upper-left
@@ -75,7 +83,7 @@ checks software delivery but cannot validate a device's firmware or ergonomics.
 
 ## Verification on this branch
 
-The full Linux DLSS build passed. Sixteen deterministic recognizer tests passed with
+The full Linux DLSS build passed. Twenty deterministic recognizer/scroll tests passed with
 AddressSanitizer and UndefinedBehaviorSanitizer enabled. An isolated KWin virtual
 Wayland desktop delivered native touch events through the compositor and GHOST.
 Those checks covered hold/slide/placement in Shader, Geometry, and Compositor
@@ -101,3 +109,25 @@ The three-finger update additionally passed compositor-injected pan, pinch,
 inertia, inertia interruption, and two-to-three / three-to-two contact transitions.
 Physical touchscreen testing remains outstanding. The support branches preserve
 published history and the upstream Blender version number.
+
+## UI-wide touch support
+
+Single-finger taps are dispatched on release, and drags begin after the movement
+threshold, so a second finger can turn a pending tap into a right-click without
+first toggling a control. Once a single-finger drag starts, extra contacts do not
+steal it. Holding empty node canvas still opens the touch Add menu; holding other
+UI controls does not open that menu.
+
+Popup and search regions are captured separately from their underlying editor.
+Scroll events reuse native smooth-scroll handlers, including UI lists and panel
+View2D limits. Fractional pixels accumulate across inertia ticks, and submenu
+hover activation is suppressed while touch scrolling. Touch Add menu selection
+uses the actual release position, including a fresh tap after lifting on a
+category, then restores the originating node canvas for preview placement.
+
+The UI-wide update passed compositor-injected property and 3D View context
+clicks, single-finger button activation, panel and popup inertia, popup dismissal
+without scroll leaking into the underlying editor, embedded-list scrolling with
+three fingers, and node placement after lifting on a submenu category. Scrolling
+did not change the test controls' values or execute menu entries. Twenty
+sanitized recognizer/scroll tests and the full DLSS build passed.
