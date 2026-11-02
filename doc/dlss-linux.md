@@ -2,7 +2,7 @@
 
 This branch starts at Blender revision `42f90a2a3a0`, matching the prior working build.
 It uses the full Release preset, Ninja, 24 jobs, and runtime CUDA/OptiX kernel compilation.
-No changes to Blender rendering code are required.
+It also includes the OptiX module-linking fix described below.
 
 Dependencies: Blender Linux x64 libraries at `23a9f7e6e449d3c4bf8806baec8b12e13045a9ad`,
 OptiX in `/opt/optix`, CUDA in `/opt/cuda`, and the NVIDIA DLSS SDK in `../dlss-sdk`
@@ -19,11 +19,29 @@ From the source directory:
 ```
 
 The script installs the NGX runtime and its unversioned symlink beside Blender.
-Verification checks compiled DLSS support, GPU capability, and a small OptiX render;
-it does not exercise interactive viewport denoising.
+Verification checks compiled DLSS support, GPU capability, and small OptiX renders
+with the default material, Bevel, Ambient Occlusion, and shadow caustics, including
+the combined shader-node and caustics path. Run with `--factory-startup` as shown;
+the script modifies the disposable scene. It does not exercise interactive
+viewport denoising.
 
 For viewport DLSS, enable the OptiX GPU in Preferences > System, then select
 Cycles GPU Compute and DLSS under Render Properties > Sampling > Viewport denoising.
+
+## OptiX shader pipeline linking
+
+OptiX links separately compiled modules for Bevel, Ambient Occlusion, and shadow
+caustics. Compile all OptiX modules with `--relocatable-device-code=true` to retain
+callable entry points without exporting unused inline functions. Retaining all
+device functions alone can produce duplicate definitions and
+`OPTIX_ERROR_PIPELINE_LINK_ERROR` when creating the
+shading pipeline. The correction applies to runtime compilation and precompiled
+OptiX kernels, including the existing OSL modules.
+
+The runtime compiler flags are part of the kernel-cache key. Rebuilding Blender
+and restarting it automatically compiles kernels under a new key; clearing the
+cache is unnecessary. Save work and restart any Blender process opened before
+the rebuild to use the corrected executable.
 
 The GitHub mirror may lack LFS objects. Use the official asset endpoint locally:
 

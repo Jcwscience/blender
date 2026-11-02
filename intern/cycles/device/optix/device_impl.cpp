@@ -205,10 +205,11 @@ string OptiXDevice::compile_kernel_get_common_cflags(const uint64_t kernel_featu
   /* Add OptiX SDK include directory to include paths. */
   common_cflags += string_printf(" -I\"%s\"", get_optix_include_dir().c_str());
 
-  /* Specialization for shader ray-tracing. */
-  if (kernel_features & KERNEL_FEATURE_NODE_RAYTRACE) {
-    common_cflags += " --keep-device-functions";
-  }
+  /* OptiX links separately compiled modules. Relocatable device code retains
+   * callable entry points without exporting unused inline functions;
+   * --keep-device-functions alone can emit duplicate visible definitions. Include
+   * this in the common flags so incompatible cached PTX is not reused. */
+  common_cflags += " --relocatable-device-code=true";
 
   return common_cflags;
 }
