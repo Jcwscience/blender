@@ -58,11 +58,12 @@ if(WITH_CYCLES_CUDA_BINARIES AND WITH_CYCLES_DEVICE_OPTIX)
 
   # Modifies in parent scope:
   # - `optix_ptx`: appended with compressed ptx output.
-  function(cycles_optix_kernel_add name cuda_nvcc_executable cuda_version input flags)
+  function(cycles_optix_kernel_add name cuda_nvcc_executable cuda_version input)
     set(output "${CMAKE_CURRENT_BINARY_DIR}/${name}.ptx")
     set(output_compressed "${output}.zst")
 
-    set(cuda_flags ${flags}
+    # Match runtime compilation: all modules participate in OptiX pipeline linking.
+    set(cuda_flags --relocatable-device-code=true
       -I "${OPTIX_INCLUDE_DIR}"
       -I "${CMAKE_CURRENT_SOURCE_DIR}/../../.."
       -o ${output})
@@ -106,59 +107,48 @@ if(WITH_CYCLES_CUDA_BINARIES AND WITH_CYCLES_DEVICE_OPTIX)
   cycles_optix_kernel_add(
     kernel_optix
     "${cuda_nvcc_executable}" "${cuda_version}"
-    "kernel.cu"
-    "")
+    "kernel.cu")
   cycles_optix_kernel_add(
     kernel_optix_mnee
     "${cuda_nvcc_executable}" "${cuda_version}"
-    "kernel_mnee.cu"
-    "")
+    "kernel_mnee.cu")
   cycles_optix_kernel_add(
     kernel_optix_shader_raytrace
     "${cuda_nvcc_executable}" "${cuda_version}"
-    "kernel_shader_raytrace.cu"
-    "--keep-device-functions")
+    "kernel_shader_raytrace.cu")
   if(WITH_CYCLES_OSL)
     cycles_optix_kernel_add(
       kernel_optix_osl
       "${cuda_nvcc_executable}" "${cuda_version}"
-      "kernel_osl.cu"
-      "--relocatable-device-code=true")
+      "kernel_osl.cu")
     cycles_optix_kernel_add(
       kernel_optix_osl_shader_raytrace
       "${cuda_nvcc_executable}" "${cuda_version}"
-      "kernel_osl_shader_raytrace.cu"
-      "--relocatable-device-code=true")
+      "kernel_osl_shader_raytrace.cu")
     cycles_optix_kernel_add(
       kernel_optix_osl_mnee
       "${cuda_nvcc_executable}" "${cuda_version}"
-      "kernel_osl_mnee.cu"
-      "--relocatable-device-code=true")
+      "kernel_osl_mnee.cu")
     cycles_optix_kernel_add(
       kernel_optix_osl_shadow
       "${cuda_nvcc_executable}" "${cuda_version}"
-      "kernel_osl_shadow.cu"
-      "--relocatable-device-code=true")
+      "kernel_osl_shadow.cu")
     cycles_optix_kernel_add(
       kernel_optix_osl_shadow_curve
       "${cuda_nvcc_executable}" "${cuda_version}"
-      "kernel_osl_shadow_curve.cu"
-      "--relocatable-device-code=true")
+      "kernel_osl_shadow_curve.cu")
     cycles_optix_kernel_add(
       kernel_optix_osl_volume
       "${cuda_nvcc_executable}" "${cuda_version}"
-      "kernel_osl_volume.cu"
-      "--relocatable-device-code=true")
+      "kernel_osl_volume.cu")
     cycles_optix_kernel_add(
       kernel_optix_osl_camera
       "${cuda_nvcc_executable}" "${cuda_version}"
-      "kernel_osl_camera.cu"
-      "--relocatable-device-code=true")
+      "kernel_osl_camera.cu")
     cycles_optix_kernel_add(
       kernel_optix_osl_services
       "${cuda_nvcc_executable}" "${cuda_version}"
-      "../../osl/services_optix.cu"
-      "--relocatable-device-code=true")
+      "../../osl/services_optix.cu")
   endif()
 
   add_custom_target(cycles_kernel_optix
